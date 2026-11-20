@@ -29,6 +29,16 @@ class OfflineFirstFarmRepository(
     override val barns: StateFlow<List<Barn>> = FarmStateFlow(state) { it.barns }
     override val logs: StateFlow<List<DailyLog>> = FarmStateFlow(state) { it.logs }
     override val activeAlerts: StateFlow<List<EarlyAlert>> = FarmStateFlow(state) { it.activeAlerts }
+    override val barnBreeds: StateFlow<Map<String, String>> = FarmStateFlow(state) { it.barnBreeds }
+
+    override suspend fun addBarn(barn: Barn) = addBarn(barn, "")
+
+    override suspend fun addBarn(barn: Barn, breed: String) {
+        state.update { current ->
+            require(current.barns.none { it.id == barn.id }) { "Duplicate barn ID." }
+            createState(current.barns + barn, current.logs, current.barnBreeds + (barn.id to breed))
+        }
+    }
 
     override suspend fun addDailyLog(log: DailyLog) {
         val pendingLog = log.copy(syncStatus = SyncStatus.PENDING)
@@ -43,7 +53,7 @@ class OfflineFirstFarmRepository(
             } else {
                 updatedLogs[existingIndex] = pendingLog
             }
-            createState(current.barns, updatedLogs.toList())
+            createState(current.barns, updatedLogs.toList(), current.barnBreeds)
         }
     }
 
@@ -82,16 +92,18 @@ class OfflineFirstFarmRepository(
                 }
             }
             if (syncedCount == 0) return 0
-            if (state.compareAndSet(current, createState(current.barns, updatedLogs))) return syncedCount
+            val updated = createState(current.barns, updatedLogs, current.barnBreeds)
+            if (state.compareAndSet(current, updated)) return syncedCount
         }
     }
 
     private fun createDemoState(): FarmState {
         val (barns, logs) = DemoFarmSeed.createDemoDataset()
-        return createState(barns, logs)
+        val breeds = barns.mapNotNull { barn -> DemoFarmSeed.breedFor(barn.id)?.let { barn.id to it } }.toMap()
+        return createState(barns, logs, breeds)
     }
 
-    private fun createState(barns: List<Barn>, logs: List<DailyLog>): FarmState {
+    private fun createState(barns: List<Barn>, logs: List<DailyLog>, barnBreeds: Map<String, String>): FarmState {
         val logsByBarn = logs.groupBy { it.barnId }
         // Active alerts describe the latest recorded date of each barn.
         val alerts = barns.flatMap { barn ->
@@ -99,13 +111,14 @@ class OfflineFirstFarmRepository(
             val latestLog = barnLogs.maxByOrNull { it.epochDay }
             if (latestLog == null) emptyList() else ZootechnicalEngine.evaluateAlerts(barn, latestLog, barnLogs)
         }
-        return FarmState(barns, logs, alerts)
+        return FarmState(barns, logs, alerts, barnBreeds)
     }
 
     private class FarmState(
         val barns: List<Barn>,
         val logs: List<DailyLog>,
         val activeAlerts: List<EarlyAlert>,
+        val barnBreeds: Map<String, String>,
     )
 
     // Each view reads from the same snapshot, including before the first collection.
