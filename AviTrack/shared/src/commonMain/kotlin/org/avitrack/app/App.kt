@@ -1,14 +1,24 @@
 package org.avitrack.app
 
+import androidx.compose.animation.animateColorAsState
+import androidx.compose.foundation.BorderStroke
+import androidx.compose.foundation.interaction.MutableInteractionSource
+import androidx.compose.foundation.interaction.collectIsHoveredAsState
 import androidx.compose.foundation.layout.Arrangement
 import androidx.compose.foundation.layout.Box
+import androidx.compose.foundation.layout.BoxWithConstraints
 import androidx.compose.foundation.layout.Column
-import androidx.compose.foundation.layout.FlowRow
+import androidx.compose.foundation.layout.PaddingValues
 import androidx.compose.foundation.layout.Row
+import androidx.compose.foundation.layout.Spacer
 import androidx.compose.foundation.layout.fillMaxSize
 import androidx.compose.foundation.layout.fillMaxWidth
 import androidx.compose.foundation.layout.padding
 import androidx.compose.foundation.layout.safeContentPadding
+import androidx.compose.foundation.layout.widthIn
+import androidx.compose.foundation.shape.RoundedCornerShape
+import androidx.compose.material3.Button
+import androidx.compose.material3.ButtonDefaults
 import androidx.compose.material3.HorizontalDivider
 import androidx.compose.material3.MaterialTheme
 import androidx.compose.material3.Surface
@@ -24,6 +34,7 @@ import androidx.compose.ui.Alignment
 import androidx.compose.ui.Modifier
 import androidx.compose.ui.semantics.contentDescription
 import androidx.compose.ui.semantics.semantics
+import androidx.compose.ui.text.style.TextOverflow
 import androidx.compose.ui.unit.dp
 import kotlinx.coroutines.launch
 import org.avitrack.app.data.repository.OfflineFirstFarmRepository
@@ -40,9 +51,17 @@ import org.avitrack.app.ui.state.StaffMember
 import org.avitrack.app.ui.state.UserRole
 import org.avitrack.app.ui.theme.AviTrackSecondaryButton
 import org.avitrack.app.ui.theme.AviTrackTheme
+import org.avitrack.app.ui.theme.LocalAviTrackColors
 
+private val HeaderBreakpoint = 768.dp
 private val HeaderPadding = 16.dp
 private val HeaderSpacing = 8.dp
+private val WideHeaderSpacing = 12.dp
+private val WideIdentityMaxWidth = 210.dp
+private val CompactHeaderShape = RoundedCornerShape(12.dp)
+private val CompactHeaderButtonPadding = PaddingValues(horizontal = 6.dp, vertical = 4.dp)
+private val CompactHeaderBorderWidth = 1.dp
+private const val COMPACT_HEADER_BORDER_ALPHA = 0.3f
 
 @Composable
 fun App() {
@@ -114,9 +133,11 @@ fun App() {
                                 )
                                 else -> OfficeDashboardScreen(
                                     barn = selectedBarn,
+                                    barns = barns,
                                     logs = logs,
                                     activeAlerts = alerts,
                                     onBack = { viewModel.selectBarn(null) },
+                                    onSelectBarn = viewModel::selectBarn,
                                     onCreateBarn = viewModel::createBarn,
                                 )
                             }
@@ -145,29 +166,96 @@ private fun AviTrackHeader(
         UserRole.OFFICE_ADMIN -> strings.officeAdmin
     }
     val networkStatus = if (online) strings.online else strings.offline
+    val themeLabel = if (darkTheme) strings.dayMode else strings.nightMode
+    val identity: @Composable (Modifier) -> Unit = { modifier ->
+        Column(modifier) {
+            Text("AviTrack", style = MaterialTheme.typography.titleLarge)
+            Text(
+                "${user.name.substringBefore(" (")} · $role",
+                style = MaterialTheme.typography.bodyMedium,
+                maxLines = 1,
+                overflow = TextOverflow.Ellipsis,
+            )
+        }
+    }
+    val networkControl: @Composable () -> Unit = {
+        Row(horizontalArrangement = Arrangement.spacedBy(HeaderSpacing), verticalAlignment = Alignment.CenterVertically) {
+            Text(networkStatus, style = MaterialTheme.typography.bodyMedium)
+            Switch(
+                checked = online,
+                onCheckedChange = onOnlineChange,
+                modifier = Modifier.semantics { contentDescription = networkStatus },
+            )
+        }
+    }
 
     Surface(color = MaterialTheme.colorScheme.surface, contentColor = MaterialTheme.colorScheme.onSurface) {
-        FlowRow(
-            modifier = Modifier.fillMaxWidth().padding(horizontal = HeaderPadding, vertical = HeaderSpacing),
-            horizontalArrangement = Arrangement.spacedBy(HeaderPadding),
-            verticalArrangement = Arrangement.spacedBy(HeaderSpacing),
-            itemVerticalAlignment = Alignment.CenterVertically,
-        ) {
-            Column {
-                Text("AviTrack", style = MaterialTheme.typography.titleLarge)
-                Text("${user.name.substringBefore(" (")} · $role", style = MaterialTheme.typography.bodyMedium)
+        BoxWithConstraints(Modifier.fillMaxWidth()) {
+            val headerModifier = Modifier.fillMaxWidth().padding(horizontal = HeaderPadding)
+            if (maxWidth >= HeaderBreakpoint) {
+                Row(
+                    headerModifier.padding(vertical = HeaderSpacing),
+                    verticalAlignment = Alignment.CenterVertically,
+                ) {
+                    identity(Modifier.widthIn(max = WideIdentityMaxWidth))
+                    Spacer(Modifier.weight(1f))
+                    Row(
+                        horizontalArrangement = Arrangement.spacedBy(WideHeaderSpacing),
+                        verticalAlignment = Alignment.CenterVertically,
+                    ) {
+                        networkControl()
+                        AviTrackSecondaryButton(themeLabel, onClick = onThemeToggle)
+                        AviTrackSecondaryButton("${strings.language} · ${language.name}", onClick = onLanguageToggle)
+                        AviTrackSecondaryButton(strings.signOut, onClick = onLogout)
+                    }
+                }
+            } else {
+                Column(headerModifier) {
+                    Row(
+                        Modifier.fillMaxWidth(),
+                        horizontalArrangement = Arrangement.spacedBy(HeaderSpacing),
+                        verticalAlignment = Alignment.CenterVertically,
+                    ) {
+                        identity(Modifier.weight(1f))
+                        networkControl()
+                    }
+                    Row(Modifier.fillMaxWidth(), horizontalArrangement = Arrangement.spacedBy(HeaderSpacing)) {
+                        CompactHeaderButton(themeLabel, onThemeToggle, Modifier.weight(1f))
+                        CompactHeaderButton(language.name, onLanguageToggle, Modifier.weight(1f), strings.language)
+                        CompactHeaderButton(strings.signOut, onLogout, Modifier.weight(1f))
+                    }
+                }
             }
-            Row(horizontalArrangement = Arrangement.spacedBy(HeaderSpacing), verticalAlignment = Alignment.CenterVertically) {
-                Text(networkStatus)
-                Switch(
-                    checked = online,
-                    onCheckedChange = onOnlineChange,
-                    modifier = Modifier.semantics { contentDescription = networkStatus },
-                )
-            }
-            AviTrackSecondaryButton(if (darkTheme) strings.dayMode else strings.nightMode, onClick = onThemeToggle)
-            AviTrackSecondaryButton("${strings.language} · ${language.name}", onClick = onLanguageToggle)
-            AviTrackSecondaryButton(strings.signOut, onClick = onLogout)
         }
+    }
+}
+
+@Composable
+private fun CompactHeaderButton(
+    text: String,
+    onClick: () -> Unit,
+    modifier: Modifier,
+    label: String = text,
+) {
+    val colors = LocalAviTrackColors.current
+    val interactionSource = remember { MutableInteractionSource() }
+    val hovered by interactionSource.collectIsHoveredAsState()
+    val background by animateColorAsState(
+        if (hovered) colors.mahoganyPrimary else colors.cinnamonBorder,
+        label = "Header button color",
+    )
+    Button(
+        onClick = onClick,
+        modifier = modifier.semantics { contentDescription = label },
+        shape = CompactHeaderShape,
+        colors = ButtonDefaults.buttonColors(
+            containerColor = background,
+            contentColor = colors.eggshellCanvas,
+        ),
+        contentPadding = CompactHeaderButtonPadding,
+        border = BorderStroke(CompactHeaderBorderWidth, colors.ochreAccent.copy(alpha = COMPACT_HEADER_BORDER_ALPHA)),
+        interactionSource = interactionSource,
+    ) {
+        Text(text, style = MaterialTheme.typography.labelMedium, maxLines = 1, overflow = TextOverflow.Ellipsis)
     }
 }

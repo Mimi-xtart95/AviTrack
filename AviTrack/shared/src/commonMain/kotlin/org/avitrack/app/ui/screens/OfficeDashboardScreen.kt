@@ -5,6 +5,7 @@ import androidx.compose.foundation.layout.Arrangement
 import androidx.compose.foundation.layout.BoxWithConstraints
 import androidx.compose.foundation.layout.Column
 import androidx.compose.foundation.layout.FlowRow
+import androidx.compose.foundation.layout.IntrinsicSize
 import androidx.compose.foundation.layout.Row
 import androidx.compose.foundation.layout.fillMaxHeight
 import androidx.compose.foundation.layout.fillMaxSize
@@ -16,6 +17,8 @@ import androidx.compose.foundation.rememberScrollState
 import androidx.compose.foundation.verticalScroll
 import androidx.compose.material3.HorizontalDivider
 import androidx.compose.material3.MaterialTheme
+import androidx.compose.material3.NavigationDrawerItem
+import androidx.compose.material3.NavigationDrawerItemDefaults
 import androidx.compose.material3.Surface
 import androidx.compose.material3.Text
 import androidx.compose.runtime.Composable
@@ -48,10 +51,12 @@ private const val MAX_WATER_REFERENCE = 260
 private const val DECIMAL_SCALE = 10.0
 private const val MISSING_VALUE = "—"
 private val DashboardBreakpoint = 860.dp
-private val SidebarWidth = 218.dp
+private val SidebarWidth = 230.dp
 private val DashboardPadding = 20.dp
 private val DashboardSpacing = 12.dp
-private val KpiWidth = 152.dp
+private val KpiSpacing = 16.dp
+private const val WideKpiColumns = 4
+private const val CompactKpiColumns = 2
 private val ChartHeight = 112.dp
 private val ChartStroke = 2.dp
 private val ChartPointRadius = 3.dp
@@ -59,9 +64,11 @@ private val ChartPointRadius = 3.dp
 @Composable
 fun OfficeDashboardScreen(
     barn: Barn,
+    barns: List<Barn>,
     logs: List<DailyLog>,
     activeAlerts: List<EarlyAlert>,
     onBack: () -> Unit,
+    onSelectBarn: (String) -> Unit,
     onCreateBarn: suspend (String, String, Int) -> Boolean,
 ) {
     val strings = LocalStrings.current
@@ -83,12 +90,26 @@ fun OfficeDashboardScreen(
                     ) {
                         Text(strings.officeDashboard, style = MaterialTheme.typography.titleLarge)
                         DashboardNavigation(onBack, openCreateBarn, vertical = true)
+                        barns.forEach { option ->
+                            NavigationDrawerItem(
+                                label = { Text(option.name) },
+                                selected = option.id == barn.id,
+                                onClick = { onSelectBarn(option.id) },
+                                modifier = Modifier.fillMaxWidth(),
+                                colors = NavigationDrawerItemDefaults.colors(
+                                    selectedContainerColor = colors.cinnamonBorder,
+                                    unselectedContainerColor = Color.Transparent,
+                                    selectedTextColor = colors.eggshellCanvas,
+                                    unselectedTextColor = colors.eggshellCanvas,
+                                ),
+                            )
+                        }
                     }
                 }
-                DashboardContent(barn, logs, activeAlerts, Modifier.weight(1f))
+                DashboardContent(barn, logs, activeAlerts, Modifier.weight(1f), WideKpiColumns)
             }
         } else {
-            DashboardContent(barn, logs, activeAlerts, Modifier.fillMaxWidth()) {
+            DashboardContent(barn, logs, activeAlerts, Modifier.fillMaxWidth(), CompactKpiColumns) {
                 DashboardNavigation(onBack, openCreateBarn, vertical = false)
             }
         }
@@ -117,12 +138,15 @@ private data class DashboardRecord(val log: DailyLog, val metrics: DailyMetrics)
     val maxTemperature: Double get() = maxOf(log.analogTempMax, log.digitalTempMax)
 }
 
+private data class KpiSummary(val label: String, val value: String, val reference: String? = null)
+
 @Composable
 private fun DashboardContent(
     barn: Barn,
     logs: List<DailyLog>,
     activeAlerts: List<EarlyAlert>,
     modifier: Modifier,
+    kpiColumns: Int,
     navigation: (@Composable () -> Unit)? = null,
 ) {
     val strings = LocalStrings.current
@@ -147,24 +171,31 @@ private fun DashboardContent(
             Text(strings.officeDashboard, style = MaterialTheme.typography.labelLarge)
         }
         Text(barn.name, style = MaterialTheme.typography.headlineMedium)
-        FlowRow(
-            horizontalArrangement = Arrangement.spacedBy(DashboardSpacing),
-            verticalArrangement = Arrangement.spacedBy(DashboardSpacing),
-        ) {
-            DashboardKpi(strings.aliveBirds, "$alive ${strings.birdsUnit}")
-            DashboardKpi(
+        val kpis = listOf(
+            KpiSummary(strings.aliveBirds, "$alive ${strings.birdsUnit}"),
+            KpiSummary(
                 strings.averageFeed,
                 withUnit(averageFeed, strings.gramsPerBirdPerDayUnit),
                 "${strings.target} · ${ZootechnicalEngine.TARGET_FEED_GRAMS_PER_BIRD.toInt()} " +
                     strings.gramsPerBirdPerDayUnit,
-            )
-            DashboardKpi(
+            ),
+            KpiSummary(
                 strings.averageWater,
                 withUnit(averageWater, strings.cubicCentimetersPerBirdPerDayUnit),
                 "${strings.referenceRange} · $MIN_WATER_REFERENCE–$MAX_WATER_REFERENCE " +
                     strings.cubicCentimetersPerBirdPerDayUnit,
-            )
-            DashboardKpi(strings.activeAlerts, alerts.size.toString())
+            ),
+            KpiSummary(strings.activeAlerts, alerts.size.toString()),
+        )
+        kpis.chunked(kpiColumns).forEach { row ->
+            Row(
+                Modifier.fillMaxWidth().height(IntrinsicSize.Max),
+                horizontalArrangement = Arrangement.spacedBy(KpiSpacing),
+            ) {
+                row.forEach { kpi ->
+                    DashboardKpi(kpi, Modifier.weight(1f).fillMaxHeight())
+                }
+            }
         }
         DashboardAlerts(alerts)
         DashboardTrends(records)
@@ -173,11 +204,11 @@ private fun DashboardContent(
 }
 
 @Composable
-private fun DashboardKpi(label: String, value: String, reference: String? = null) {
-    AviTrackCard(Modifier.width(KpiWidth)) {
-        Text(label, style = MaterialTheme.typography.labelLarge)
-        Text(value, style = MaterialTheme.typography.titleMedium)
-        reference?.let { Text(it, style = MaterialTheme.typography.bodySmall) }
+private fun DashboardKpi(kpi: KpiSummary, modifier: Modifier) {
+    AviTrackCard(modifier) {
+        Text(kpi.label, style = MaterialTheme.typography.labelLarge)
+        Text(kpi.value, style = MaterialTheme.typography.titleMedium)
+        kpi.reference?.let { Text(it, style = MaterialTheme.typography.bodySmall) }
     }
 }
 
