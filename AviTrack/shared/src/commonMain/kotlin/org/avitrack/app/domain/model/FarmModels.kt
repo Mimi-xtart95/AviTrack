@@ -31,11 +31,31 @@ data class Barn(
     val id: String,
     val name: String,
     val initialBirdCount: Int,
+    val placementEpochDay: Int = UNKNOWN_PLACEMENT_EPOCH_DAY,
+    val placementAgeWeeks: Int = 18,
+    val comfortTempMin: Double = 18.0,
+    val comfortTempMax: Double = 28.0,
+    val sensorDeviationMax: Double = 2.0,
 ) {
     init {
         require(initialBirdCount >= 0)
+        require(placementAgeWeeks >= 0)
+        require(comfortTempMin.isFinite() && comfortTempMax.isFinite() && comfortTempMin <= comfortTempMax)
+        require(sensorDeviationMax.isFinite() && sensorDeviationMax >= 0.0)
+    }
+
+    companion object {
+        const val UNKNOWN_PLACEMENT_EPOCH_DAY = Int.MAX_VALUE
     }
 }
+
+data class IntakeTargets(
+    val targetFeedGramsPerBird: Double,
+    val minFeedGramsPerBird: Double,
+    val maxFeedGramsPerBird: Double,
+    val minWaterCm3PerBird: Double,
+    val maxWaterCm3PerBird: Double,
+)
 
 /** The epoch day represents the farm's local calendar date, measured from 1970-01-01. */
 data class DailyLog(
@@ -68,6 +88,8 @@ data class DailyMetrics(
     val feedGramsPerBird: Double?,
     val waterCubicCentimetersPerBird: Double?,
     val sensorDriftCelsius: Double,
+    val flockAgeWeeks: Int,
+    val intakeTargets: IntakeTargets,
 )
 
 data class EarlyAlert(

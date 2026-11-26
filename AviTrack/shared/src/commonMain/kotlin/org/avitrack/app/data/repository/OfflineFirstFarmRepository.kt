@@ -52,6 +52,18 @@ class OfflineFirstFarmRepository(
         }
     }
 
+    override suspend fun updateBarn(barn: Barn) {
+        state.update { current ->
+            require(current.barns.any { it.id == barn.id }) { "Unknown barn ID." }
+            createState(
+                current.barns.map { if (it.id == barn.id) barn else it },
+                current.logs,
+                current.barnBreeds,
+                current.pendingBarnIds + barn.id,
+            )
+        }
+    }
+
     override suspend fun addDailyLog(log: DailyLog) {
         val pendingLog = log.copy(syncStatus = SyncStatus.PENDING)
         state.update { current ->
@@ -85,7 +97,7 @@ class OfflineFirstFarmRepository(
                 if (pendingLogs.isNotEmpty()) pushLogs(pendingLogs)
             } else {
                 remote.upsertBarns(snapshot.barns.map { barn ->
-                    BarnRow(barn.id, barn.name, snapshot.barnBreeds[barn.id].orEmpty(), barn.initialBirdCount)
+                    BarnRow.from(barn, snapshot.barnBreeds[barn.id].orEmpty())
                 })
                 remote.upsertLogs(pendingLogs)
             }
@@ -105,7 +117,8 @@ class OfflineFirstFarmRepository(
                     .map { it.barnId }.toSet()
                 val remoteIds = remoteBarns.map { it.id }.toSet()
                 val localBarns = current.barns.filter {
-                    it.id !in demoBarnIds || it.id in editedParentIds || remoteBarns.isEmpty()
+                    it.id !in demoBarnIds || it.id in editedParentIds ||
+                        it.id in current.pendingBarnIds || remoteBarns.isEmpty()
                 }
                 val mergedBarns = localBarns.associateBy { it.id } + remoteBarns
                     .filterNot { it.id in current.pendingBarnIds }

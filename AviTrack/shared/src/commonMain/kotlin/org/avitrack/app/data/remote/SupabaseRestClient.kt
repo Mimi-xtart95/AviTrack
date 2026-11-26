@@ -19,6 +19,8 @@ import io.ktor.http.contentType
 import io.ktor.http.isSuccess
 import io.ktor.serialization.kotlinx.json.json
 import kotlinx.serialization.SerialName
+import kotlinx.serialization.EncodeDefault
+import kotlinx.serialization.ExperimentalSerializationApi
 import kotlinx.serialization.Serializable
 import kotlinx.serialization.json.Json
 import org.avitrack.app.domain.model.Barn
@@ -120,14 +122,38 @@ internal interface RemoteRow {
 }
 
 @Serializable
+@OptIn(ExperimentalSerializationApi::class)
 internal data class BarnRow(
     @SerialName("id") override val id: String,
     @SerialName("name") val name: String,
     @SerialName("breed") val breed: String,
     @SerialName("initial_bird_count") val initialBirdCount: Int,
     @SerialName("created_at") val createdAt: String? = null,
+    @EncodeDefault @SerialName("placement_epoch_day")
+    val placementEpochDay: Int = Barn.UNKNOWN_PLACEMENT_EPOCH_DAY,
+    @EncodeDefault @SerialName("placement_age_weeks") val placementAgeWeeks: Int = 18,
+    @EncodeDefault @SerialName("comfort_temp_min") val comfortTempMin: Double = 18.0,
+    @EncodeDefault @SerialName("comfort_temp_max") val comfortTempMax: Double = 28.0,
+    @EncodeDefault @SerialName("sensor_deviation_max") val sensorDeviationMax: Double = 2.0,
 ) : RemoteRow {
-    fun toBarn(): Barn = Barn(id, name, initialBirdCount)
+    fun toBarn(): Barn = Barn(
+        id, name, initialBirdCount, placementEpochDay, placementAgeWeeks, comfortTempMin, comfortTempMax,
+        sensorDeviationMax,
+    )
+
+    companion object {
+        fun from(barn: Barn, breed: String): BarnRow = BarnRow(
+            id = barn.id,
+            name = barn.name,
+            breed = breed,
+            initialBirdCount = barn.initialBirdCount,
+            placementEpochDay = barn.placementEpochDay,
+            placementAgeWeeks = barn.placementAgeWeeks,
+            comfortTempMin = barn.comfortTempMin,
+            comfortTempMax = barn.comfortTempMax,
+            sensorDeviationMax = barn.sensorDeviationMax,
+        )
+    }
 }
 
 @Serializable

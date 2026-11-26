@@ -9,9 +9,9 @@ import kotlin.math.round
 object DemoFarmSeed {
     private const val NORTH_BARN_ID = "barn-01-north"
     private const val SOUTH_BARN_ID = "barn-02-south"
-    private const val DAYS_PER_BARN = 30
+    private const val NORTH_LOG_DAYS = 30
+    private const val SOUTH_LOG_DAYS = 7
     private const val LAST_DEMO_EPOCH_DAY = 20_775 // 2026-11-18
-    private const val STABLE_WATER_PER_BIRD = 235.0
     private const val INITIAL_WATER_METER_M3 = 1_200.0
     private const val WATER_METER_DECIMAL_SCALE = 10.0
     private const val STABLE_MIN_TEMPERATURE = 21.6
@@ -39,32 +39,42 @@ object DemoFarmSeed {
     }
 
     fun createDemoDataset(): Pair<List<Barn>, List<DailyLog>> {
-        val northBarn = Barn(NORTH_BARN_ID, "Barn 01 - North", 18_000)
-        val southBarn = Barn(SOUTH_BARN_ID, "Barn 02 - South", 15_000)
+        val northBarn = Barn(
+            NORTH_BARN_ID, "Barn 01 - North", 18_000,
+            placementEpochDay = LAST_DEMO_EPOCH_DAY - NORTH_LOG_DAYS + 1,
+            placementAgeWeeks = 24,
+        )
+        val southBarn = Barn(
+            SOUTH_BARN_ID, "Barn 02 - South", 15_000,
+            placementEpochDay = LAST_DEMO_EPOCH_DAY - SOUTH_LOG_DAYS + 1,
+        )
         return listOf(northBarn, southBarn) to
-            (createLogs(northBarn) + createLogs(southBarn, southBarnStressDays))
+            (createLogs(northBarn, NORTH_LOG_DAYS) + createLogs(southBarn, SOUTH_LOG_DAYS, southBarnStressDays))
     }
 
-    private fun createLogs(barn: Barn, stressDays: List<StressDay> = emptyList()): List<DailyLog> {
-        val firstEpochDay = LAST_DEMO_EPOCH_DAY - DAYS_PER_BARN + 1
-        val stableDays = DAYS_PER_BARN - stressDays.size
+    private fun createLogs(barn: Barn, days: Int, stressDays: List<StressDay> = emptyList()): List<DailyLog> {
+        val stableDays = days - stressDays.size
         var aliveBirds = barn.initialBirdCount
         var waterMeterM3 = INITIAL_WATER_METER_M3
 
-        return List(DAYS_PER_BARN) { dayIndex ->
+        return List(days) { dayIndex ->
+            val epochDay = barn.placementEpochDay + dayIndex
             val variation = dailyVariation[dayIndex % dailyVariation.size]
             val stressDay = stressDays.getOrNull(dayIndex - stableDays)
             val mortalityCount = stressDay?.mortalityCount ?: if (variation > 0.0) 2 else 1
             aliveBirds -= mortalityCount
 
-            val feedPerBird = ZootechnicalEngine.TARGET_FEED_GRAMS_PER_BIRD + variation
-            val waterPerBird = stressDay?.waterPerBird ?: (STABLE_WATER_PER_BIRD + variation)
+            val age = ZootechnicalEngine.flockAgeWeeksAt(barn, epochDay)
+            val targets = ZootechnicalEngine.standardIntakeTargetsForWeek(age)
+            val feedPerBird = targets.targetFeedGramsPerBird + variation
+            val waterPerBird = stressDay?.waterPerBird ?:
+                ((targets.minWaterCm3PerBird + targets.maxWaterCm3PerBird) / 2 + variation)
             if (dayIndex > 0) waterMeterM3 += waterPerBird * aliveBirds / CUBIC_CENTIMETERS_PER_CUBIC_METER
             val digitalTempMin = STABLE_MIN_TEMPERATURE + variation
             val digitalTempMax = stressDay?.digitalTempMax ?: (STABLE_MAX_TEMPERATURE + variation)
             DailyLog(
                 barnId = barn.id,
-                epochDay = firstEpochDay + dayIndex,
+                epochDay = epochDay,
                 analogTempMin = digitalTempMin - ANALOG_MIN_OFFSET,
                 analogTempMax = digitalTempMax - ANALOG_MAX_OFFSET,
                 digitalTempMin = digitalTempMin,

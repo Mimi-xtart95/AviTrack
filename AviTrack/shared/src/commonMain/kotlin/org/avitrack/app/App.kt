@@ -153,6 +153,7 @@ fun App() {
                                     onBack = { viewModel.selectBarn(null) },
                                     onSelectBarn = viewModel::selectBarn,
                                     onCreateBarn = viewModel::createBarn,
+                                    onUpdateBarn = viewModel::updateBarn,
                                 )
                             }
                         }
