@@ -20,8 +20,6 @@ object ZootechnicalEngine {
     private const val MAX_FEED_GRAMS_PER_BIRD = 126.0
     private const val MIN_WATER_CUBIC_CENTIMETERS_PER_BIRD = 210.0
     private const val MAX_WATER_CUBIC_CENTIMETERS_PER_BIRD = 260.0
-    private const val MIN_HUMIDITY_PERCENTAGE = 50.0
-    private const val MAX_HUMIDITY_PERCENTAGE = 75.0
     private const val GRAMS_PER_KILOGRAM = 1_000.0
     private const val CUBIC_CENTIMETERS_PER_CUBIC_METER = 1_000_000.0
     private const val PERCENT_MULTIPLIER = 100.0
@@ -47,7 +45,8 @@ object ZootechnicalEngine {
     ): DailyMetrics {
         require(log.barnId == barn.id)
         val previousLogs = previousLogsFor(log, history)
-        return calculateMetrics(log, calculateAliveBirds(barn, previousLogs + log))
+        val previousLog = previousLogs.maxByOrNull { it.epochDay }
+        return calculateMetrics(log, calculateAliveBirds(barn, previousLogs + log), previousLog)
     }
 
     /**
@@ -61,6 +60,7 @@ object ZootechnicalEngine {
     ): List<EarlyAlert> {
         require(log.barnId == barn.id)
         val previousLogs = previousLogsFor(log, history)
+        val previousLog = previousLogs.maxByOrNull { it.epochDay }
         val aliveBirds = calculateAliveBirds(barn, previousLogs + log)
         return buildList {
             fun addAlert(type: AlertType, severity: AlertSeverity = AlertSeverity.WARNING) {
@@ -85,23 +85,20 @@ object ZootechnicalEngine {
                 // Compare in input units so conversion roundoff does not trigger alerts at the limits.
                 val minFeedKg = MIN_FEED_GRAMS_PER_BIRD * aliveBirds / GRAMS_PER_KILOGRAM
                 val maxFeedKg = MAX_FEED_GRAMS_PER_BIRD * aliveBirds / GRAMS_PER_KILOGRAM
-                val minWaterM3 = MIN_WATER_CUBIC_CENTIMETERS_PER_BIRD * aliveBirds /
-                    CUBIC_CENTIMETERS_PER_CUBIC_METER
-                val maxWaterM3 = MAX_WATER_CUBIC_CENTIMETERS_PER_BIRD * aliveBirds /
-                    CUBIC_CENTIMETERS_PER_CUBIC_METER
-
                 when {
                     log.feedKg < minFeedKg -> addAlert(AlertType.LOW_FEED_INTAKE)
                     log.feedKg > maxFeedKg -> addAlert(AlertType.HIGH_FEED_INTAKE)
                 }
-                when {
-                    log.waterM3 < minWaterM3 -> addAlert(AlertType.LOW_WATER_INTAKE)
-                    log.waterM3 > maxWaterM3 -> addAlert(AlertType.HIGH_WATER_INTAKE)
+                if (previousLog != null && dailyWaterM3(log, previousLog) != null) {
+                    val daysElapsed = daysBetween(log, previousLog)
+                    val volumeFactor = aliveBirds * daysElapsed / CUBIC_CENTIMETERS_PER_CUBIC_METER
+                    val minReading = previousLog.waterM3 + MIN_WATER_CUBIC_CENTIMETERS_PER_BIRD * volumeFactor
+                    val maxReading = previousLog.waterM3 + MAX_WATER_CUBIC_CENTIMETERS_PER_BIRD * volumeFactor
+                    when {
+                        log.waterM3 < minReading -> addAlert(AlertType.LOW_WATER_INTAKE)
+                        log.waterM3 > maxReading -> addAlert(AlertType.HIGH_WATER_INTAKE)
+                    }
                 }
-            }
-            when {
-                log.relativeHumidityAvg < MIN_HUMIDITY_PERCENTAGE -> addAlert(AlertType.LOW_HUMIDITY)
-                log.relativeHumidityAvg > MAX_HUMIDITY_PERCENTAGE -> addAlert(AlertType.HIGH_HUMIDITY)
             }
         }
     }
@@ -112,14 +109,23 @@ object ZootechnicalEngine {
     private fun exceedsSensorDrift(analog: Double, digital: Double): Boolean =
         maxOf(analog, digital) > minOf(analog, digital) + MAX_SENSOR_DRIFT_CELSIUS
 
-    private fun calculateMetrics(log: DailyLog, aliveBirds: Int): DailyMetrics {
+    private fun daysBetween(log: DailyLog, previousLog: DailyLog): Double =
+        (log.epochDay.toLong() - previousLog.epochDay).coerceAtLeast(1).toDouble()
+
+    private fun dailyWaterM3(log: DailyLog, previousLog: DailyLog): Double? {
+        val volume = log.waterM3 - previousLog.waterM3
+        return volume.takeIf { it.isFinite() && it >= 0.0 }?.div(daysBetween(log, previousLog))
+    }
+
+    private fun calculateMetrics(log: DailyLog, aliveBirds: Int, previousLog: DailyLog?): DailyMetrics {
         val denominator = aliveBirds.takeIf { it > 0 }
         return DailyMetrics(
             aliveBirds = aliveBirds,
             mortalityPercentage = denominator?.let { log.mortalityCount * PERCENT_MULTIPLIER / it },
             feedGramsPerBird = denominator?.let { log.feedKg * GRAMS_PER_KILOGRAM / it },
             waterCubicCentimetersPerBird = denominator?.let {
-                log.waterM3 * CUBIC_CENTIMETERS_PER_CUBIC_METER / it
+                previousLog?.let { previous -> dailyWaterM3(log, previous) }
+                    ?.times(CUBIC_CENTIMETERS_PER_CUBIC_METER)?.div(it)
             },
             sensorDriftCelsius = maxOf(
                 abs(log.digitalTempMin - log.analogTempMin),

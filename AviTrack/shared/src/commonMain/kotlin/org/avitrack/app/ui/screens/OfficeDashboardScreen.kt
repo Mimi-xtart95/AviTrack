@@ -15,7 +15,9 @@ import androidx.compose.foundation.layout.padding
 import androidx.compose.foundation.layout.width
 import androidx.compose.foundation.rememberScrollState
 import androidx.compose.foundation.verticalScroll
+import androidx.compose.material3.AlertDialog
 import androidx.compose.material3.HorizontalDivider
+import androidx.compose.material3.Icon
 import androidx.compose.material3.MaterialTheme
 import androidx.compose.material3.NavigationDrawerItem
 import androidx.compose.material3.NavigationDrawerItemDefaults
@@ -26,11 +28,16 @@ import androidx.compose.runtime.getValue
 import androidx.compose.runtime.mutableStateOf
 import androidx.compose.runtime.remember
 import androidx.compose.runtime.setValue
+import androidx.compose.ui.Alignment
 import androidx.compose.ui.Modifier
 import androidx.compose.ui.geometry.Offset
 import androidx.compose.ui.graphics.Color
 import androidx.compose.ui.unit.dp
+import org.avitrack.app.data.export.CsvExportLocation
+import org.avitrack.app.data.export.CsvExportResult
+import org.avitrack.app.data.export.CsvFileSaver
 import org.avitrack.app.domain.engine.ZootechnicalEngine
+import org.avitrack.app.domain.export.ZootechnicalCsvExporter
 import org.avitrack.app.domain.model.AlertSeverity
 import org.avitrack.app.domain.model.Barn
 import org.avitrack.app.domain.model.DailyLog
@@ -60,6 +67,8 @@ private const val CompactKpiColumns = 2
 private val ChartHeight = 112.dp
 private val ChartStroke = 2.dp
 private val ChartPointRadius = 3.dp
+private val UnsafeFileNameCharacters = Regex("[^a-zA-Z0-9_-]+")
+private const val MAX_FILE_NAME_BARN_LENGTH = 80
 
 @Composable
 fun OfficeDashboardScreen(
@@ -161,6 +170,12 @@ private fun DashboardContent(
     val alive = records.lastOrNull()?.metrics?.aliveBirds ?: barn.initialBirdCount
     val averageFeed = records.mapNotNull { it.metrics.feedGramsPerBird }.average()
     val averageWater = records.mapNotNull { it.metrics.waterCubicCentimetersPerBird }.average()
+    var exportResult by remember { mutableStateOf<CsvExportResult?>(null) }
+    var exporting by remember { mutableStateOf(false) }
+    val saveCsv = CsvFileSaver.rememberSave {
+        exporting = false
+        exportResult = it
+    }
 
     Column(
         modifier = modifier.fillMaxHeight().verticalScroll(rememberScrollState()).padding(DashboardPadding),
@@ -170,7 +185,27 @@ private fun DashboardContent(
             it()
             Text(strings.officeDashboard, style = MaterialTheme.typography.labelLarge)
         }
-        Text(barn.name, style = MaterialTheme.typography.headlineMedium)
+        FlowRow(
+            modifier = Modifier.fillMaxWidth(),
+            horizontalArrangement = Arrangement.SpaceBetween,
+            itemVerticalAlignment = Alignment.CenterVertically,
+        ) {
+            Text(barn.name, style = MaterialTheme.typography.headlineMedium)
+            AviTrackSecondaryButton(
+                text = strings.exportCsv,
+                enabled = !exporting,
+                onClick = {
+                    exportResult = null
+                    val barnName = barn.name.replace(UnsafeFileNameCharacters, "_")
+                        .take(MAX_FILE_NAME_BARN_LENGTH).trim('_').ifEmpty { "barn" }
+                    val report = runCatching { ZootechnicalCsvExporter.buildBarnReportCsv(barn, logs) }
+                    report.onSuccess {
+                        exporting = true
+                        saveCsv("avitrack_${barnName}_report.csv", it)
+                    }.onFailure { exportResult = CsvExportResult.Failed }
+                },
+            )
+        }
         val kpis = listOf(
             KpiSummary(strings.aliveBirds, "$alive ${strings.birdsUnit}"),
             KpiSummary(
@@ -201,6 +236,43 @@ private fun DashboardContent(
         DashboardTrends(records)
         DashboardHistory(records.takeLast(RECENT_LOG_COUNT).asReversed())
     }
+    exportResult?.let { CsvExportDialog(it, onDismiss = { exportResult = null }) }
+}
+
+@Composable
+private fun CsvExportDialog(result: CsvExportResult, onDismiss: () -> Unit) {
+    val strings = LocalStrings.current
+    val colors = LocalAviTrackColors.current
+    val title = when (result) {
+        is CsvExportResult.Saved -> strings.csvDialogTitle
+        CsvExportResult.Failed -> strings.csvExportFailed
+        CsvExportResult.Cancelled -> strings.csvExportCancelled
+    }
+    AlertDialog(
+        onDismissRequest = onDismiss,
+        title = { Text(title) },
+        icon = if (result is CsvExportResult.Saved) {
+            { Icon(ConfirmationCheckIcon, contentDescription = null, tint = colors.dsmTechBlue) }
+        } else {
+            null
+        },
+        text = if (result is CsvExportResult.Saved) {
+            {
+                val location = when (val destination = result.location) {
+                    is CsvExportLocation.FilePath -> destination.path
+                    CsvExportLocation.BrowserDownloads -> strings.csvBrowserDownloadLocation
+                    CsvExportLocation.SelectedDocument -> strings.csvSelectedLocation
+                }
+                Column(verticalArrangement = Arrangement.spacedBy(DashboardSpacing)) {
+                    Text("${strings.csvFileNameLabel}: ${result.fileName}")
+                    Text("${strings.csvLocationLabel}: $location")
+                }
+            }
+        } else {
+            null
+        },
+        confirmButton = { AviTrackPrimaryButton(strings.ok, onClick = onDismiss) },
+    )
 }
 
 @Composable
@@ -330,6 +402,13 @@ private fun DashboardHistory(records: List<DashboardRecord>) {
                             withUnit(record.metrics.waterCubicCentimetersPerBird, strings.cubicCentimetersPerBirdPerDayUnit),
                     )
                     Text("${strings.mortalityCount} · ${log.mortalityCount}")
+                    val meterReading = if (log.waterM3.isFinite()) {
+                        "${formatWaterMeterReading(log.waterM3, strings.decimalSeparator)} ${strings.cubicMetersUnit}"
+                    } else {
+                        MISSING_VALUE
+                    }
+                    Text("${strings.waterM3} · $meterReading")
+                    Text("${strings.litterPercentage} · ${log.litterPercentage}${strings.percentUnit}")
                     Text(strings.syncStatusText(log.syncStatus))
                 }
             }

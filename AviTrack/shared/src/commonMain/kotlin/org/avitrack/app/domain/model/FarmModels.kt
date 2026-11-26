@@ -48,6 +48,7 @@ data class DailyLog(
     val relativeHumidityAvg: Double,
     val mortalityCount: Int,
     val feedKg: Double,
+    /** Cumulative water meter reading in cubic meters. */
     val waterM3: Double,
     val litterPercentage: Int,
     val notes: String = "",

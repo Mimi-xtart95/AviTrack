@@ -1,5 +1,6 @@
 package org.avitrack.app.domain
 
+import org.avitrack.app.data.seed.DemoFarmSeed
 import org.avitrack.app.domain.engine.ZootechnicalEngine
 import org.avitrack.app.domain.model.AlertType
 import org.avitrack.app.domain.model.Barn
@@ -7,6 +8,8 @@ import org.avitrack.app.domain.model.DailyLog
 import kotlin.test.Test
 import kotlin.test.assertEquals
 import kotlin.test.assertFalse
+import kotlin.test.assertNotNull
+import kotlin.test.assertNull
 import kotlin.test.assertTrue
 
 class ZootechnicalEngineTest {
@@ -21,7 +24,7 @@ class ZootechnicalEngineTest {
         relativeHumidityAvg = 62.0,
         mortalityCount = 0,
         feedKg = 118.0,
-        waterM3 = 0.235,
+        waterM3 = 1_200.0,
         litterPercentage = 20,
     )
 
@@ -41,23 +44,73 @@ class ZootechnicalEngineTest {
     fun convertsFeedAndWaterUsingClosingLiveBirdCount() {
         val largerBarn = barn.copy(initialBirdCount = 1_010)
         val previousLog = normalLog.copy(mortalityCount = 8)
-        val currentLog = normalLog.copy(epochDay = SECOND_EPOCH_DAY, mortalityCount = 2)
+        val currentLog = normalLog.copy(epochDay = SECOND_EPOCH_DAY, mortalityCount = 2, waterM3 = 1_200.235)
         val metrics = ZootechnicalEngine.calculateDailyMetrics(largerBarn, currentLog, listOf(previousLog))
 
         assertEquals(1_000, metrics.aliveBirds)
         assertEquals(118.0, metrics.feedGramsPerBird)
-        assertEquals(235.0, metrics.waterCubicCentimetersPerBird)
+        assertEquals(235.0, assertNotNull(metrics.waterCubicCentimetersPerBird), WATER_TOLERANCE)
     }
 
     @Test
     fun acceptsBothWaterIntakeLimits() {
-        val lowerLimit = normalLog.copy(waterM3 = 0.210)
-        val upperLimit = normalLog.copy(waterM3 = 0.260)
+        val lowerLimit = normalLog.copy(epochDay = SECOND_EPOCH_DAY, waterM3 = 1_200.210)
+        val upperLimit = normalLog.copy(epochDay = SECOND_EPOCH_DAY, waterM3 = 1_200.260)
+        val history = listOf(normalLog)
 
-        assertEquals(210.0, ZootechnicalEngine.calculateDailyMetrics(barn, lowerLimit).waterCubicCentimetersPerBird)
-        assertEquals(260.0, ZootechnicalEngine.calculateDailyMetrics(barn, upperLimit).waterCubicCentimetersPerBird)
-        assertTrue(alertTypes(lowerLimit).isEmpty())
-        assertTrue(alertTypes(upperLimit).isEmpty())
+        for ((expected, log) in listOf(210.0 to lowerLimit, 260.0 to upperLimit)) {
+            val water = ZootechnicalEngine.calculateDailyMetrics(barn, log, history).waterCubicCentimetersPerBird
+            assertEquals(expected, assertNotNull(water), WATER_TOLERANCE)
+            assertTrue(alertTypes(log, history).isEmpty())
+        }
+        assertEquals(setOf(AlertType.LOW_WATER_INTAKE), alertTypes(lowerLimit.copy(waterM3 = 1_200.20), history))
+        assertEquals(setOf(AlertType.HIGH_WATER_INTAKE), alertTypes(upperLimit.copy(waterM3 = 1_200.27), history))
+    }
+
+    @Test
+    fun firstMeterReadingHasNoWaterMetricOrAlert() {
+        assertNull(ZootechnicalEngine.calculateDailyMetrics(barn, normalLog).waterCubicCentimetersPerBird)
+        assertTrue(alertTypes(normalLog).isEmpty())
+    }
+
+    @Test
+    fun averagesWeekendConsumptionUsingLatestEarlierReadingFromTheSameBarn() {
+        val saturday = normalLog.copy(epochDay = SECOND_EPOCH_DAY, waterM3 = 1_201.0)
+        val monday = normalLog.copy(epochDay = FOURTH_EPOCH_DAY, waterM3 = 1_201.47)
+        val otherBarn = normalLog.copy(barnId = "other", epochDay = THIRD_EPOCH_DAY)
+        val history = listOf(saturday, otherBarn, normalLog, monday)
+
+        val water = ZootechnicalEngine.calculateDailyMetrics(barn, monday, history).waterCubicCentimetersPerBird
+        assertEquals(235.0, assertNotNull(water), WATER_TOLERANCE)
+        assertTrue(alertTypes(monday, history).isEmpty())
+    }
+
+    @Test
+    fun decreasingReadingHasNoWaterMetricOrAlert() {
+        val log = normalLog.copy(epochDay = SECOND_EPOCH_DAY, waterM3 = 1_199.0)
+        val history = listOf(normalLog)
+        assertNull(ZootechnicalEngine.calculateDailyMetrics(barn, log, history).waterCubicCentimetersPerBird)
+        assertTrue(alertTypes(log, history).isEmpty())
+    }
+
+    @Test
+    fun extremeHumidityDoesNotGenerateAlerts() {
+        for (humidity in listOf(20.0, 95.0)) {
+            val log = normalLog.copy(epochDay = SECOND_EPOCH_DAY, waterM3 = 1_200.235, relativeHumidityAvg = humidity)
+            assertTrue(alertTypes(log, listOf(normalLog)).isEmpty())
+        }
+    }
+
+    @Test
+    fun demoMeterReadingsIncreaseAndPreserveTheWaterAlertScenario() {
+        val (barns, logs) = DemoFarmSeed.createDemoDataset()
+        val alertsByBarn = barns.map { demoBarn ->
+            val history = logs.filter { it.barnId == demoBarn.id }.sortedBy { it.epochDay }
+            assertTrue(history.zipWithNext().all { (earlier, later) -> earlier.waterM3 < later.waterM3 })
+            ZootechnicalEngine.evaluateAlerts(demoBarn, history.last(), history).map { it.type }
+        }
+        assertTrue(alertsByBarn.first().isEmpty())
+        assertTrue(AlertType.HIGH_WATER_INTAKE in alertsByBarn.last())
     }
 
     @Test
@@ -167,5 +220,6 @@ class ZootechnicalEngineTest {
         const val MIN_LITTER_PERCENTAGE = 0
         const val MAX_LITTER_PERCENTAGE = 100
         const val LITTER_PERCENTAGE_STEP = 10
+        const val WATER_TOLERANCE = 1e-6
     }
 }
