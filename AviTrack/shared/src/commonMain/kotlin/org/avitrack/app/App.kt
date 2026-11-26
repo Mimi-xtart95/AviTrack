@@ -26,6 +26,8 @@ import androidx.compose.material3.Switch
 import androidx.compose.material3.Text
 import androidx.compose.runtime.Composable
 import androidx.compose.runtime.CompositionLocalProvider
+import androidx.compose.runtime.DisposableEffect
+import androidx.compose.runtime.LaunchedEffect
 import androidx.compose.runtime.collectAsState
 import androidx.compose.runtime.getValue
 import androidx.compose.runtime.remember
@@ -65,12 +67,22 @@ private const val COMPACT_HEADER_BORDER_ALPHA = 0.3f
 
 @Composable
 fun App() {
-    val viewModel = remember { AviTrackViewModel(OfflineFirstFarmRepository()) }
+    val repository = remember { OfflineFirstFarmRepository() }
+    val viewModel = remember(repository) { AviTrackViewModel(repository) }
     val scope = rememberCoroutineScope()
     val user by viewModel.currentUser.collectAsState()
     val language by viewModel.language.collectAsState()
     val isDarkTheme by viewModel.isDarkTheme.collectAsState()
     val isOnline by viewModel.isOnline.collectAsState()
+    LaunchedEffect(repository, isOnline) {
+        if (isOnline) {
+            repository.refreshFromRemote()
+            repository.syncPendingLogs()
+        }
+    }
+    DisposableEffect(repository) {
+        onDispose { repository.close() }
+    }
     val barnId by viewModel.selectedBarnId.collectAsState()
     val barns by viewModel.barns.collectAsState()
     val breeds by viewModel.barnBreeds.collectAsState()
@@ -130,6 +142,8 @@ fun App() {
                                     logs = logs,
                                     onBack = { viewModel.selectBarn(null) },
                                     onSubmit = viewModel::submitDailyLog,
+                                    // Read the repository snapshot before the UI collector recomposes.
+                                    readSavedLogs = { viewModel.logs.value },
                                 )
                                 else -> OfficeDashboardScreen(
                                     barn = selectedBarn,
