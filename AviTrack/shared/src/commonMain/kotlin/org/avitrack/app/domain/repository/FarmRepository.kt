@@ -15,6 +15,8 @@ interface FarmRepository {
 
     suspend fun addBarn(barn: Barn, breed: String)
 
+    suspend fun updateBarn(barn: Barn)
+
     /** Saves one record per barn and date, replacing an earlier entry for the same day. */
     suspend fun addDailyLog(log: DailyLog)
 

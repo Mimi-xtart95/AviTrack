@@ -64,9 +64,6 @@ import kotlin.time.Instant
 private const val MILLIS_PER_DAY = 86_400_000L
 private const val MAX_LITTER_PERCENTAGE = 100
 private const val LITTER_PERCENTAGE_STEP = 10
-private const val FEED_PREVIEW_TOLERANCE = 0.15
-private const val MIN_WATER_PER_BIRD = 210.0
-private const val MAX_WATER_PER_BIRD = 260.0
 private const val WATER_METER_DECIMAL_SCALE = 100.0
 private const val WATER_PREVIEW_ROUNDING_TOLERANCE = 1e-6
 private const val DISPLAY_SCALE = 10.0
@@ -98,7 +95,7 @@ fun BarnModeScreen(
     val latestLogs by rememberUpdatedState(logs)
     var selectedDay by remember(barn.id) {
         // Start with today's UTC date. The operator can select the farm's local date.
-        mutableIntStateOf(Clock.System.now().toEpochMilliseconds().floorDiv(MILLIS_PER_DAY).toInt())
+        mutableIntStateOf(currentEpochDay())
     }
     var showDatePicker by remember { mutableStateOf(false) }
     var lastSubmissionDay by remember(barn.id) { mutableStateOf<Int?>(null) }
@@ -117,6 +114,8 @@ fun BarnModeScreen(
     val currentAliveBirds = remember(barn, logs, selectedDay) {
         ZootechnicalEngine.calculateAliveBirds(barn, logs.filter { it.epochDay < selectedDay })
     }
+    val ageWeeks = ZootechnicalEngine.flockAgeWeeksAt(barn, selectedDay)
+    val targets = ZootechnicalEngine.standardIntakeTargetsForWeek(ageWeeks)
     val previousWaterReading = remember(barn.id, logs, selectedDay) {
         logs.asSequence()
             .filter { it.barnId == barn.id && it.epochDay < selectedDay }
@@ -145,6 +144,7 @@ fun BarnModeScreen(
         AviTrackSecondaryButton(strings.backToBarns, onClick = onBack, enabled = !saving)
         Text(strings.dailyReport, style = MaterialTheme.typography.headlineMedium)
         Text(barn.name, style = MaterialTheme.typography.titleMedium)
+        Text(strings.flockAge.replace("{week}", ageWeeks.toString()))
         AviTrackSecondaryButton(
             text = "${strings.date} · ${formatEpochDay(selectedDay)}",
             onClick = { showDatePicker = true },
@@ -191,9 +191,9 @@ fun BarnModeScreen(
             ) { field ->
                 when (field) {
                     Reading.FEED -> {
-                        val target = ZootechnicalEngine.TARGET_FEED_GRAMS_PER_BIRD
-                        IntakeEstimate(intakePreview?.feedGramsPerBird, strings.gramsPerBirdUnit, strings.feedIntakeTarget) {
-                            outsideIntakeRange(it, target * (1 - FEED_PREVIEW_TOLERANCE), target * (1 + FEED_PREVIEW_TOLERANCE))
+                        val hint = strings.feedIntakeTarget.replace("{target}", targets.targetFeedGramsPerBird.toInt().toString())
+                        IntakeEstimate(intakePreview?.feedGramsPerBird, strings.gramsPerBirdUnit, hint) {
+                            outsideIntakeRange(it, targets.minFeedGramsPerBird, targets.maxFeedGramsPerBird)
                         }
                     }
                     Reading.WATER -> {
@@ -218,11 +218,13 @@ fun BarnModeScreen(
                         IntakeEstimate(
                             intakePreview?.waterCubicCentimetersPerBird,
                             strings.cubicCentimetersPerBirdUnit,
-                            strings.waterIntakeTarget,
+                            strings.waterIntakeTarget.replace(
+                                "{range}", "${targets.minWaterCm3PerBird.toInt()}–${targets.maxWaterCm3PerBird.toInt()}",
+                            ),
                             showZero = true,
                         ) {
-                            it < MIN_WATER_PER_BIRD - WATER_PREVIEW_ROUNDING_TOLERANCE ||
-                                it > MAX_WATER_PER_BIRD + WATER_PREVIEW_ROUNDING_TOLERANCE
+                            it < targets.minWaterCm3PerBird - WATER_PREVIEW_ROUNDING_TOLERANCE ||
+                                it > targets.maxWaterCm3PerBird + WATER_PREVIEW_ROUNDING_TOLERANCE
                         }
                     }
                     else -> Unit
@@ -291,7 +293,7 @@ fun BarnModeScreen(
             )
         }
     }
-    postSaveAlerts?.let { EarlyWarningDialog(it, onDismiss = { postSaveAlerts = null }) }
+    postSaveAlerts?.let { EarlyWarningDialog(barn, it, onDismiss = { postSaveAlerts = null }) }
     confirmedReport?.let { report ->
         val savedLog = (readSavedLogs?.invoke() ?: logs).find {
             it.barnId == report.barnId && it.epochDay == report.epochDay
@@ -462,7 +464,7 @@ private fun findPostSaveAlerts(barn: Barn, submitted: DailyLog, history: List<Da
 }
 
 @Composable
-private fun EarlyWarningDialog(result: PostSaveAlerts, onDismiss: () -> Unit) {
+private fun EarlyWarningDialog(barn: Barn, result: PostSaveAlerts, onDismiss: () -> Unit) {
     val strings = LocalStrings.current
     val colors = LocalAviTrackColors.current
     val borderColor = if (result.alerts.any { it.severity == AlertSeverity.CRITICAL }) {
@@ -489,7 +491,7 @@ private fun EarlyWarningDialog(result: PostSaveAlerts, onDismiss: () -> Unit) {
                 )
                 result.alerts.forEach { alert ->
                     val copy = strings.alertText(alert.type)
-                    val reading = alertReading(alert.type, result)
+                    val reading = alertReading(barn, alert.type, result)
                     Column {
                         Text(copy.title, style = MaterialTheme.typography.titleSmall)
                         Text(copy.description, style = MaterialTheme.typography.bodyMedium)
@@ -506,10 +508,14 @@ private fun EarlyWarningDialog(result: PostSaveAlerts, onDismiss: () -> Unit) {
 private data class AlertReading(val detected: String, val expected: String)
 
 @Composable
-private fun alertReading(type: AlertType, result: PostSaveAlerts): AlertReading {
+private fun alertReading(barn: Barn, type: AlertType, result: PostSaveAlerts): AlertReading {
     val strings = LocalStrings.current
     val log = result.log
     val metrics = result.metrics
+    val targets = metrics.intakeTargets
+    fun range(min: Double, max: Double, unit: String): String =
+        "${formatReading(min, strings.decimalSeparator, ALERT_DISPLAY_SCALE)}–" +
+            formatReading(max, strings.decimalSeparator, ALERT_DISPLAY_SCALE) + " $unit"
     fun reading(value: Double?, unit: String): String {
         if (value == null) return "—"
         return "${formatReading(value, strings.decimalSeparator, ALERT_DISPLAY_SCALE)} $unit"
@@ -522,11 +528,11 @@ private fun alertReading(type: AlertType, result: PostSaveAlerts): AlertReading 
             } else {
                 maxOf(log.analogTempMax, log.digitalTempMax)
             }
-            AlertReading(reading(value, strings.celsiusUnit), "18–28 ${strings.celsiusUnit}")
+            AlertReading(reading(value, strings.celsiusUnit), range(barn.comfortTempMin, barn.comfortTempMax, strings.celsiusUnit))
         }
         AlertType.SENSOR_DRIFT -> AlertReading(
             reading(metrics.sensorDriftCelsius, strings.celsiusUnit),
-            "≤ 2 ${strings.celsiusUnit}",
+            "≤ ${reading(barn.sensorDeviationMax, strings.celsiusUnit)}",
         )
         AlertType.SUSTAINED_MORTALITY -> {
             val count = "${log.mortalityCount} ${strings.birdsUnit}"
@@ -541,11 +547,11 @@ private fun alertReading(type: AlertType, result: PostSaveAlerts): AlertReading 
         }
         AlertType.LOW_FEED_INTAKE, AlertType.HIGH_FEED_INTAKE -> AlertReading(
             reading(metrics.feedGramsPerBird, strings.gramsPerBirdUnit),
-            "110–126 ${strings.gramsPerBirdUnit}",
+            range(targets.minFeedGramsPerBird, targets.maxFeedGramsPerBird, strings.gramsPerBirdUnit),
         )
         AlertType.LOW_WATER_INTAKE, AlertType.HIGH_WATER_INTAKE -> AlertReading(
             reading(metrics.waterCubicCentimetersPerBird, strings.cubicCentimetersPerBirdUnit),
-            "${MIN_WATER_PER_BIRD.toInt()}–${MAX_WATER_PER_BIRD.toInt()} ${strings.cubicCentimetersPerBirdUnit}",
+            range(targets.minWaterCm3PerBird, targets.maxWaterCm3PerBird, strings.cubicCentimetersPerBirdUnit),
         )
         AlertType.LOW_HUMIDITY, AlertType.HIGH_HUMIDITY -> AlertReading(
             reading(log.relativeHumidityAvg, strings.percentUnit),
@@ -636,7 +642,9 @@ private fun Map<Reading, String>.toLog(
 internal fun formatEpochDay(day: Int): String =
     Instant.fromEpochMilliseconds(day * MILLIS_PER_DAY).toString().substringBefore('T')
 
-private fun parseEpochDay(date: String): Int? {
+internal fun currentEpochDay(): Int = Clock.System.now().toEpochMilliseconds().floorDiv(MILLIS_PER_DAY).toInt()
+
+internal fun parseEpochDay(date: String): Int? {
     val instant = try {
         Instant.parse("${date}T00:00:00Z")
     } catch (_: IllegalArgumentException) {

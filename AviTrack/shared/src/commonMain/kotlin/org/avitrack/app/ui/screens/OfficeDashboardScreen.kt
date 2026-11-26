@@ -11,9 +11,11 @@ import androidx.compose.foundation.layout.fillMaxHeight
 import androidx.compose.foundation.layout.fillMaxSize
 import androidx.compose.foundation.layout.fillMaxWidth
 import androidx.compose.foundation.layout.height
+import androidx.compose.foundation.layout.heightIn
 import androidx.compose.foundation.layout.padding
 import androidx.compose.foundation.layout.width
 import androidx.compose.foundation.rememberScrollState
+import androidx.compose.foundation.text.KeyboardOptions
 import androidx.compose.foundation.verticalScroll
 import androidx.compose.material3.AlertDialog
 import androidx.compose.material3.HorizontalDivider
@@ -27,12 +29,15 @@ import androidx.compose.runtime.Composable
 import androidx.compose.runtime.getValue
 import androidx.compose.runtime.mutableStateOf
 import androidx.compose.runtime.remember
+import androidx.compose.runtime.rememberCoroutineScope
 import androidx.compose.runtime.setValue
 import androidx.compose.ui.Alignment
 import androidx.compose.ui.Modifier
 import androidx.compose.ui.geometry.Offset
 import androidx.compose.ui.graphics.Color
+import androidx.compose.ui.text.input.KeyboardType
 import androidx.compose.ui.unit.dp
+import kotlinx.coroutines.launch
 import org.avitrack.app.data.export.CsvExportLocation
 import org.avitrack.app.data.export.CsvExportResult
 import org.avitrack.app.data.export.CsvFileSaver
@@ -48,19 +53,19 @@ import org.avitrack.app.ui.theme.AviTrackCard
 import org.avitrack.app.ui.theme.AviTrackPrimaryButton
 import org.avitrack.app.ui.theme.AviTrackSecondaryButton
 import org.avitrack.app.ui.theme.AviTrackStatusBadge
+import org.avitrack.app.ui.theme.AviTrackTextField
 import org.avitrack.app.ui.theme.LocalAviTrackColors
 import kotlin.math.round
 
 private const val CHART_DAYS = 14
 private const val RECENT_LOG_COUNT = 7
-private const val MIN_WATER_REFERENCE = 210
-private const val MAX_WATER_REFERENCE = 260
 private const val DECIMAL_SCALE = 10.0
 private const val MISSING_VALUE = "—"
 private val DashboardBreakpoint = 860.dp
 private val SidebarWidth = 230.dp
 private val DashboardPadding = 20.dp
 private val DashboardSpacing = 12.dp
+private val BarnSettingsMaxHeight = 360.dp
 private val KpiSpacing = 16.dp
 private const val WideKpiColumns = 4
 private const val CompactKpiColumns = 2
@@ -79,11 +84,14 @@ fun OfficeDashboardScreen(
     onBack: () -> Unit,
     onSelectBarn: (String) -> Unit,
     onCreateBarn: suspend (String, String, Int) -> Boolean,
+    onUpdateBarn: suspend (Barn) -> Boolean,
 ) {
     val strings = LocalStrings.current
     val colors = LocalAviTrackColors.current
     var showCreateBarn by remember { mutableStateOf(false) }
+    var showBarnSettings by remember(barn.id) { mutableStateOf(false) }
     val openCreateBarn = { showCreateBarn = true }
+    val openBarnSettings = { showBarnSettings = true }
 
     BoxWithConstraints(Modifier.fillMaxSize()) {
         if (maxWidth >= DashboardBreakpoint) {
@@ -115,10 +123,10 @@ fun OfficeDashboardScreen(
                         }
                     }
                 }
-                DashboardContent(barn, logs, activeAlerts, Modifier.weight(1f), WideKpiColumns)
+                DashboardContent(barn, logs, activeAlerts, Modifier.weight(1f), WideKpiColumns, openBarnSettings)
             }
         } else {
-            DashboardContent(barn, logs, activeAlerts, Modifier.fillMaxWidth(), CompactKpiColumns) {
+            DashboardContent(barn, logs, activeAlerts, Modifier.fillMaxWidth(), CompactKpiColumns, openBarnSettings) {
                 DashboardNavigation(onBack, openCreateBarn, vertical = false)
             }
         }
@@ -126,6 +134,9 @@ fun OfficeDashboardScreen(
 
     if (showCreateBarn) {
         CreateBarnDialog(onDismiss = { showCreateBarn = false }, onCreateBarn = onCreateBarn)
+    }
+    if (showBarnSettings) {
+        BarnConfigurationDialog(barn, onUpdateBarn, onDismiss = { showBarnSettings = false })
     }
 }
 
@@ -156,6 +167,7 @@ private fun DashboardContent(
     activeAlerts: List<EarlyAlert>,
     modifier: Modifier,
     kpiColumns: Int,
+    onBarnSettings: () -> Unit,
     navigation: (@Composable () -> Unit)? = null,
 ) {
     val strings = LocalStrings.current
@@ -170,6 +182,9 @@ private fun DashboardContent(
     val alive = records.lastOrNull()?.metrics?.aliveBirds ?: barn.initialBirdCount
     val averageFeed = records.mapNotNull { it.metrics.feedGramsPerBird }.average()
     val averageWater = records.mapNotNull { it.metrics.waterCubicCentimetersPerBird }.average()
+    val latestMetrics = records.lastOrNull()?.metrics
+    val ageWeeks = latestMetrics?.flockAgeWeeks ?: ZootechnicalEngine.flockAgeWeeksAt(barn, currentEpochDay())
+    val targets = latestMetrics?.intakeTargets ?: ZootechnicalEngine.standardIntakeTargetsForWeek(ageWeeks)
     var exportResult by remember { mutableStateOf<CsvExportResult?>(null) }
     var exporting by remember { mutableStateOf(false) }
     val saveCsv = CsvFileSaver.rememberSave {
@@ -191,6 +206,7 @@ private fun DashboardContent(
             itemVerticalAlignment = Alignment.CenterVertically,
         ) {
             Text(barn.name, style = MaterialTheme.typography.headlineMedium)
+            AviTrackSecondaryButton(strings.barnSettings, onClick = onBarnSettings)
             AviTrackSecondaryButton(
                 text = strings.exportCsv,
                 enabled = !exporting,
@@ -206,18 +222,19 @@ private fun DashboardContent(
                 },
             )
         }
+        Text(strings.flockAge.replace("{week}", ageWeeks.toString()))
         val kpis = listOf(
             KpiSummary(strings.aliveBirds, "$alive ${strings.birdsUnit}"),
             KpiSummary(
                 strings.averageFeed,
                 withUnit(averageFeed, strings.gramsPerBirdPerDayUnit),
-                "${strings.target} · ${ZootechnicalEngine.TARGET_FEED_GRAMS_PER_BIRD.toInt()} " +
+                "${strings.target} · ${targets.targetFeedGramsPerBird.toInt()} " +
                     strings.gramsPerBirdPerDayUnit,
             ),
             KpiSummary(
                 strings.averageWater,
                 withUnit(averageWater, strings.cubicCentimetersPerBirdPerDayUnit),
-                "${strings.referenceRange} · $MIN_WATER_REFERENCE–$MAX_WATER_REFERENCE " +
+                "${strings.referenceRange} · ${targets.minWaterCm3PerBird.toInt()}–${targets.maxWaterCm3PerBird.toInt()} " +
                     strings.cubicCentimetersPerBirdPerDayUnit,
             ),
             KpiSummary(strings.activeAlerts, alerts.size.toString()),
@@ -238,6 +255,107 @@ private fun DashboardContent(
     }
     exportResult?.let { CsvExportDialog(it, onDismiss = { exportResult = null }) }
 }
+
+@Composable
+private fun BarnConfigurationDialog(
+    barn: Barn,
+    onSave: suspend (Barn) -> Boolean,
+    onDismiss: () -> Unit,
+) {
+    val strings = LocalStrings.current
+    val scope = rememberCoroutineScope()
+    val today = currentEpochDay()
+    var placementDate by remember(barn.id) {
+        mutableStateOf(
+            if (barn.placementEpochDay == Barn.UNKNOWN_PLACEMENT_EPOCH_DAY) "" else formatEpochDay(barn.placementEpochDay),
+        )
+    }
+    var age by remember(barn.id) { mutableStateOf(barn.placementAgeWeeks.toString()) }
+    var minimum by remember(barn.id) { mutableStateOf(barn.comfortTempMin.toString()) }
+    var maximum by remember(barn.id) { mutableStateOf(barn.comfortTempMax.toString()) }
+    var deviation by remember(barn.id) { mutableStateOf(barn.sensorDeviationMax.toString()) }
+    var saving by remember(barn.id) { mutableStateOf(false) }
+    var saveFailed by remember(barn.id) { mutableStateOf(false) }
+    val epochDay = parseEpochDay(placementDate.trim())
+        ?.takeUnless { it == Barn.UNKNOWN_PLACEMENT_EPOCH_DAY }
+    val ageWeeks = age.trim().toIntOrNull()?.takeIf { it >= 0 }
+    val minTemp = minimum.toFiniteDecimal()
+    val maxTemp = maximum.toFiniteDecimal()
+    val maxDeviation = deviation.toFiniteDecimal()?.takeIf { it >= 0.0 }
+    val valid = epochDay != null && ageWeeks != null && minTemp != null && maxTemp != null &&
+        minTemp <= maxTemp && maxDeviation != null
+
+    AlertDialog(
+        onDismissRequest = { if (!saving) onDismiss() },
+        title = { Text(strings.barnSettings) },
+        text = {
+            Column(
+                modifier = Modifier.heightIn(max = BarnSettingsMaxHeight).verticalScroll(rememberScrollState()),
+                verticalArrangement = Arrangement.spacedBy(DashboardSpacing),
+            ) {
+                Text(barn.name, style = MaterialTheme.typography.titleSmall)
+                AviTrackTextField(
+                    placementDate, { placementDate = it }, "${strings.placementDate} (${strings.dateFormat})",
+                    modifier = Modifier.fillMaxWidth(), enabled = !saving,
+                )
+                AviTrackTextField(
+                    age, { age = it }, strings.placementAgeWeeks,
+                    modifier = Modifier.fillMaxWidth(), enabled = !saving,
+                    keyboardOptions = KeyboardOptions(keyboardType = KeyboardType.Number),
+                )
+                if (epochDay != null && ageWeeks != null) {
+                    val updated = barn.copy(placementEpochDay = epochDay, placementAgeWeeks = ageWeeks)
+                    val currentAge = ZootechnicalEngine.flockAgeWeeksAt(updated, today)
+                    Text(strings.flockAge.replace("{week}", currentAge.toString()))
+                }
+                for ((label, value, change) in listOf(
+                    Triple(strings.comfortTempMin, minimum, { input: String -> minimum = input }),
+                    Triple(strings.comfortTempMax, maximum, { input: String -> maximum = input }),
+                    Triple(strings.sensorDeviationMax, deviation, { input: String -> deviation = input }),
+                )) {
+                    AviTrackTextField(
+                        value, change, "$label (${strings.celsiusUnit})",
+                        modifier = Modifier.fillMaxWidth(), enabled = !saving,
+                        keyboardOptions = KeyboardOptions(keyboardType = KeyboardType.Decimal),
+                    )
+                }
+                if (!valid || saveFailed) {
+                    Text(
+                        if (!valid) strings.invalidBarnSettings else strings.barnSaveFailed,
+                        color = MaterialTheme.colorScheme.error,
+                    )
+                }
+            }
+        },
+        confirmButton = {
+            AviTrackPrimaryButton(
+                strings.save,
+                enabled = valid && !saving,
+                onClick = save@{
+                    val updated = barn.copy(
+                        placementEpochDay = epochDay ?: return@save,
+                        placementAgeWeeks = ageWeeks ?: return@save,
+                        comfortTempMin = minTemp ?: return@save,
+                        comfortTempMax = maxTemp ?: return@save,
+                        sensorDeviationMax = maxDeviation ?: return@save,
+                    )
+                    saving = true
+                    saveFailed = false
+                    scope.launch {
+                        try {
+                            if (onSave(updated)) onDismiss() else saveFailed = true
+                        } finally {
+                            saving = false
+                        }
+                    }
+                },
+            )
+        },
+        dismissButton = { AviTrackSecondaryButton(strings.cancel, onClick = onDismiss, enabled = !saving) },
+    )
+}
+
+private fun String.toFiniteDecimal(): Double? = trim().replace(',', '.').toDoubleOrNull()?.takeIf { it.isFinite() }
 
 @Composable
 private fun CsvExportDialog(result: CsvExportResult, onDismiss: () -> Unit) {

@@ -6,23 +6,29 @@ import org.avitrack.app.domain.model.Barn
 import org.avitrack.app.domain.model.DailyLog
 import org.avitrack.app.domain.model.DailyMetrics
 import org.avitrack.app.domain.model.EarlyAlert
+import org.avitrack.app.domain.model.IntakeTargets
 import kotlin.math.abs
 
 object ZootechnicalEngine {
-    const val TARGET_FEED_GRAMS_PER_BIRD = 118.0
-
-    private const val MIN_TEMPERATURE_CELSIUS = 18.0
-    private const val MAX_TEMPERATURE_CELSIUS = 28.0
-    private const val MAX_SENSOR_DRIFT_CELSIUS = 2.0
+    private const val DAYS_PER_WEEK = 7
     private const val MAX_MORTALITY_PERCENTAGE = 0.02
     private const val SUSTAINED_MORTALITY_DAYS = 3
-    private const val MIN_FEED_GRAMS_PER_BIRD = 110.0
-    private const val MAX_FEED_GRAMS_PER_BIRD = 126.0
-    private const val MIN_WATER_CUBIC_CENTIMETERS_PER_BIRD = 210.0
-    private const val MAX_WATER_CUBIC_CENTIMETERS_PER_BIRD = 260.0
     private const val GRAMS_PER_KILOGRAM = 1_000.0
     private const val CUBIC_CENTIMETERS_PER_CUBIC_METER = 1_000_000.0
     private const val PERCENT_MULTIPLIER = 100.0
+
+    fun flockAgeWeeksAt(barn: Barn, epochDay: Int): Int {
+        val daysSincePlacement = (epochDay.toLong() - barn.placementEpochDay).coerceAtLeast(0)
+        return (barn.placementAgeWeeks + daysSincePlacement / DAYS_PER_WEEK).coerceAtMost(Int.MAX_VALUE.toLong()).toInt()
+    }
+
+    fun standardIntakeTargetsForWeek(ageWeeks: Int): IntakeTargets = when {
+        ageWeeks < 18 -> IntakeTargets(82.0, 74.0, 92.0, 150.0, 195.0)
+        ageWeeks <= 19 -> IntakeTargets(94.0, 84.0, 104.0, 170.0, 220.0)
+        ageWeeks <= 22 -> IntakeTargets(108.0, 96.0, 118.0, 195.0, 245.0)
+        ageWeeks <= 50 -> IntakeTargets(118.0, 105.0, 130.0, 210.0, 260.0)
+        else -> IntakeTargets(114.0, 102.0, 126.0, 205.0, 255.0)
+    }
 
     /** Uses one log per farm-local date for the barn, through the desired cutoff date. */
     fun calculateAliveBirds(barn: Barn, logs: Iterable<DailyLog>): Int {
@@ -46,7 +52,7 @@ object ZootechnicalEngine {
         require(log.barnId == barn.id)
         val previousLogs = previousLogsFor(log, history)
         val previousLog = previousLogs.maxByOrNull { it.epochDay }
-        return calculateMetrics(log, calculateAliveBirds(barn, previousLogs + log), previousLog)
+        return calculateMetrics(barn, log, calculateAliveBirds(barn, previousLogs + log), previousLog)
     }
 
     /**
@@ -62,19 +68,20 @@ object ZootechnicalEngine {
         val previousLogs = previousLogsFor(log, history)
         val previousLog = previousLogs.maxByOrNull { it.epochDay }
         val aliveBirds = calculateAliveBirds(barn, previousLogs + log)
+        val targets = standardIntakeTargetsForWeek(flockAgeWeeksAt(barn, log.epochDay))
         return buildList {
             fun addAlert(type: AlertType, severity: AlertSeverity = AlertSeverity.WARNING) {
                 add(EarlyAlert(log.barnId, log.epochDay, type, severity))
             }
 
-            if (minOf(log.analogTempMin, log.digitalTempMin) < MIN_TEMPERATURE_CELSIUS) {
+            if (minOf(log.analogTempMin, log.digitalTempMin) < barn.comfortTempMin) {
                 addAlert(AlertType.LOW_TEMPERATURE)
             }
-            if (maxOf(log.analogTempMax, log.digitalTempMax) > MAX_TEMPERATURE_CELSIUS) {
+            if (maxOf(log.analogTempMax, log.digitalTempMax) > barn.comfortTempMax) {
                 addAlert(AlertType.HIGH_TEMPERATURE)
             }
-            if (exceedsSensorDrift(log.analogTempMin, log.digitalTempMin) ||
-                exceedsSensorDrift(log.analogTempMax, log.digitalTempMax)
+            if (exceedsSensorDrift(log.analogTempMin, log.digitalTempMin, barn.sensorDeviationMax) ||
+                exceedsSensorDrift(log.analogTempMax, log.digitalTempMax, barn.sensorDeviationMax)
             ) {
                 addAlert(AlertType.SENSOR_DRIFT)
             }
@@ -83,8 +90,8 @@ object ZootechnicalEngine {
             }
             if (aliveBirds > 0) {
                 // Compare in input units so conversion roundoff does not trigger alerts at the limits.
-                val minFeedKg = MIN_FEED_GRAMS_PER_BIRD * aliveBirds / GRAMS_PER_KILOGRAM
-                val maxFeedKg = MAX_FEED_GRAMS_PER_BIRD * aliveBirds / GRAMS_PER_KILOGRAM
+                val minFeedKg = targets.minFeedGramsPerBird * aliveBirds / GRAMS_PER_KILOGRAM
+                val maxFeedKg = targets.maxFeedGramsPerBird * aliveBirds / GRAMS_PER_KILOGRAM
                 when {
                     log.feedKg < minFeedKg -> addAlert(AlertType.LOW_FEED_INTAKE)
                     log.feedKg > maxFeedKg -> addAlert(AlertType.HIGH_FEED_INTAKE)
@@ -92,8 +99,8 @@ object ZootechnicalEngine {
                 if (previousLog != null && dailyWaterM3(log, previousLog) != null) {
                     val daysElapsed = daysBetween(log, previousLog)
                     val volumeFactor = aliveBirds * daysElapsed / CUBIC_CENTIMETERS_PER_CUBIC_METER
-                    val minReading = previousLog.waterM3 + MIN_WATER_CUBIC_CENTIMETERS_PER_BIRD * volumeFactor
-                    val maxReading = previousLog.waterM3 + MAX_WATER_CUBIC_CENTIMETERS_PER_BIRD * volumeFactor
+                    val minReading = previousLog.waterM3 + targets.minWaterCm3PerBird * volumeFactor
+                    val maxReading = previousLog.waterM3 + targets.maxWaterCm3PerBird * volumeFactor
                     when {
                         log.waterM3 < minReading -> addAlert(AlertType.LOW_WATER_INTAKE)
                         log.waterM3 > maxReading -> addAlert(AlertType.HIGH_WATER_INTAKE)
@@ -106,8 +113,8 @@ object ZootechnicalEngine {
     private fun previousLogsFor(log: DailyLog, history: Iterable<DailyLog>): List<DailyLog> =
         history.filter { it.barnId == log.barnId && it.epochDay < log.epochDay }
 
-    private fun exceedsSensorDrift(analog: Double, digital: Double): Boolean =
-        maxOf(analog, digital) > minOf(analog, digital) + MAX_SENSOR_DRIFT_CELSIUS
+    private fun exceedsSensorDrift(analog: Double, digital: Double, limit: Double): Boolean =
+        maxOf(analog, digital) > minOf(analog, digital) + limit
 
     private fun daysBetween(log: DailyLog, previousLog: DailyLog): Double =
         (log.epochDay.toLong() - previousLog.epochDay).coerceAtLeast(1).toDouble()
@@ -117,8 +124,9 @@ object ZootechnicalEngine {
         return volume.takeIf { it.isFinite() && it >= 0.0 }?.div(daysBetween(log, previousLog))
     }
 
-    private fun calculateMetrics(log: DailyLog, aliveBirds: Int, previousLog: DailyLog?): DailyMetrics {
+    private fun calculateMetrics(barn: Barn, log: DailyLog, aliveBirds: Int, previousLog: DailyLog?): DailyMetrics {
         val denominator = aliveBirds.takeIf { it > 0 }
+        val ageWeeks = flockAgeWeeksAt(barn, log.epochDay)
         return DailyMetrics(
             aliveBirds = aliveBirds,
             mortalityPercentage = denominator?.let { log.mortalityCount * PERCENT_MULTIPLIER / it },
@@ -131,6 +139,8 @@ object ZootechnicalEngine {
                 abs(log.digitalTempMin - log.analogTempMin),
                 abs(log.digitalTempMax - log.analogTempMax),
             ),
+            flockAgeWeeks = ageWeeks,
+            intakeTargets = standardIntakeTargetsForWeek(ageWeeks),
         )
     }
 

@@ -103,6 +103,17 @@ class AviTrackViewModel(private val repository: FarmRepository) {
         }
     }
 
+    suspend fun updateBarn(barn: Barn): Boolean {
+        if (currentUser.value?.role != UserRole.OFFICE_ADMIN || selectedBarnId.value != barn.id) return false
+        try {
+            repository.updateBarn(barn)
+        } catch (_: IllegalArgumentException) {
+            return false
+        }
+        if (isOnline.value) repository.syncPendingLogs()
+        return true
+    }
+
     private companion object {
         const val MAX_HUMIDITY_PERCENTAGE = 100.0
     }

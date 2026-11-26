@@ -13,7 +13,10 @@ import kotlin.test.assertNull
 import kotlin.test.assertTrue
 
 class ZootechnicalEngineTest {
-    private val barn = Barn(id = "barn-01", name = "Barn 01", initialBirdCount = 1_000)
+    private val barn = Barn(
+        id = "barn-01", name = "Barn 01", initialBirdCount = 1_000,
+        placementEpochDay = FIRST_EPOCH_DAY, placementAgeWeeks = 28,
+    )
     private val normalLog = DailyLog(
         barnId = barn.id,
         epochDay = FIRST_EPOCH_DAY,
@@ -27,6 +30,54 @@ class ZootechnicalEngineTest {
         waterM3 = 1_200.0,
         litterPercentage = 20,
     )
+
+    @Test
+    fun flockAgeAdvancesAfterEachFullWeek() {
+        val young = barn.copy(placementAgeWeeks = 18)
+        assertEquals(18, ZootechnicalEngine.flockAgeWeeksAt(young, FIRST_EPOCH_DAY - 1))
+        assertEquals(18, ZootechnicalEngine.flockAgeWeeksAt(young, FIRST_EPOCH_DAY))
+        assertEquals(18, ZootechnicalEngine.flockAgeWeeksAt(young, FIRST_EPOCH_DAY + 6))
+        assertEquals(19, ZootechnicalEngine.flockAgeWeeksAt(young, FIRST_EPOCH_DAY + 7))
+        assertEquals(20, ZootechnicalEngine.flockAgeWeeksAt(young, FIRST_EPOCH_DAY + 14))
+    }
+
+    @Test
+    fun sameFeedIntakeIsNormalAtPlacementButLowAtPeak() {
+        val young = barn.copy(placementAgeWeeks = 18)
+        val log = normalLog.copy(feedKg = 92.0)
+        assertTrue(ZootechnicalEngine.evaluateAlerts(young, log).isEmpty())
+        assertEquals(setOf(AlertType.LOW_FEED_INTAKE), alertTypes(log))
+        val metrics = ZootechnicalEngine.calculateDailyMetrics(young, log)
+        assertEquals(18, metrics.flockAgeWeeks)
+        assertEquals(94.0, metrics.intakeTargets.targetFeedGramsPerBird)
+        assertEquals(118.0, ZootechnicalEngine.calculateDailyMetrics(barn, log).intakeTargets.targetFeedGramsPerBird)
+    }
+
+    @Test
+    fun usesWaterRangeForTheAgeOnTheLogDate() {
+        val young = barn.copy(placementAgeWeeks = 18)
+        val log = normalLog.copy(epochDay = SECOND_EPOCH_DAY, feedKg = 94.0, waterM3 = 1_200.230)
+        val history = listOf(normalLog)
+        assertEquals(
+            listOf(AlertType.HIGH_WATER_INTAKE),
+            ZootechnicalEngine.evaluateAlerts(young, log, history).map { it.type },
+        )
+        assertTrue(alertTypes(log.copy(feedKg = 118.0), history).isEmpty())
+    }
+
+    @Test
+    fun appliesEachBarnsEnvironmentalLimits() {
+        assertTrue(alertTypes(normalLog.copy(analogTempMax = 26.5, digitalTempMax = 26.5)).isEmpty())
+        assertTrue(alertTypes(normalLog.copy(analogTempMax = 28.0, digitalTempMax = 28.0)).isEmpty())
+        assertEquals(setOf(AlertType.HIGH_TEMPERATURE), alertTypes(normalLog.copy(digitalTempMax = 28.1)))
+
+        val configured = barn.copy(comfortTempMin = 20.0, comfortTempMax = 30.0, sensorDeviationMax = 0.5)
+        val log = normalLog.copy(analogTempMax = 28.1, digitalTempMax = 29.0)
+        assertEquals(
+            setOf(AlertType.LOW_TEMPERATURE, AlertType.SENSOR_DRIFT),
+            ZootechnicalEngine.evaluateAlerts(configured, log).map { it.type }.toSet(),
+        )
+    }
 
     @Test
     fun subtractsCumulativeMortalityFromLiveBirdCount() {
@@ -104,6 +155,11 @@ class ZootechnicalEngineTest {
     @Test
     fun demoMeterReadingsIncreaseAndPreserveTheWaterAlertScenario() {
         val (barns, logs) = DemoFarmSeed.createDemoDataset()
+        assertEquals(2, barns.size)
+        assertTrue(barns.all { it.comfortTempMax == 28.0 })
+        assertEquals(listOf(28, 18), barns.map { demoBarn ->
+            ZootechnicalEngine.flockAgeWeeksAt(demoBarn, logs.filter { it.barnId == demoBarn.id }.maxOf { it.epochDay })
+        })
         val alertsByBarn = barns.map { demoBarn ->
             val history = logs.filter { it.barnId == demoBarn.id }.sortedBy { it.epochDay }
             assertTrue(history.zipWithNext().all { (earlier, later) -> earlier.waterM3 < later.waterM3 })
