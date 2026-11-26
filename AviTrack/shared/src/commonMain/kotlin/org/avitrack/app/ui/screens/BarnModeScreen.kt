@@ -1,19 +1,23 @@
 package org.avitrack.app.ui.screens
 
+import androidx.compose.foundation.border
 import androidx.compose.foundation.layout.Arrangement
 import androidx.compose.foundation.layout.BoxWithConstraints
 import androidx.compose.foundation.layout.Column
 import androidx.compose.foundation.layout.FlowRow
 import androidx.compose.foundation.layout.fillMaxSize
 import androidx.compose.foundation.layout.fillMaxWidth
+import androidx.compose.foundation.layout.heightIn
 import androidx.compose.foundation.layout.padding
 import androidx.compose.foundation.layout.width
 import androidx.compose.foundation.layout.widthIn
 import androidx.compose.foundation.rememberScrollState
+import androidx.compose.foundation.shape.RoundedCornerShape
 import androidx.compose.foundation.text.KeyboardOptions
 import androidx.compose.foundation.verticalScroll
 import androidx.compose.material3.AlertDialog
 import androidx.compose.material3.FilterChip
+import androidx.compose.material3.Icon
 import androidx.compose.material3.MaterialTheme
 import androidx.compose.material3.Text
 import androidx.compose.material3.TextButton
@@ -23,13 +27,25 @@ import androidx.compose.runtime.mutableIntStateOf
 import androidx.compose.runtime.mutableStateOf
 import androidx.compose.runtime.remember
 import androidx.compose.runtime.rememberCoroutineScope
+import androidx.compose.runtime.rememberUpdatedState
 import androidx.compose.runtime.setValue
 import androidx.compose.ui.Modifier
+import androidx.compose.ui.graphics.Color
+import androidx.compose.ui.graphics.PathFillType
+import androidx.compose.ui.graphics.SolidColor
+import androidx.compose.ui.graphics.vector.ImageVector
+import androidx.compose.ui.graphics.vector.path
+import androidx.compose.ui.text.font.FontFamily
 import androidx.compose.ui.text.input.KeyboardType
 import androidx.compose.ui.unit.dp
 import kotlinx.coroutines.launch
+import org.avitrack.app.domain.engine.ZootechnicalEngine
+import org.avitrack.app.domain.model.AlertSeverity
+import org.avitrack.app.domain.model.AlertType
 import org.avitrack.app.domain.model.Barn
 import org.avitrack.app.domain.model.DailyLog
+import org.avitrack.app.domain.model.DailyMetrics
+import org.avitrack.app.domain.model.EarlyAlert
 import org.avitrack.app.domain.model.SyncStatus
 import org.avitrack.app.i18n.LocalStrings
 import org.avitrack.app.ui.theme.AviTrackCard
@@ -38,16 +54,28 @@ import org.avitrack.app.ui.theme.AviTrackSecondaryButton
 import org.avitrack.app.ui.theme.AviTrackStatusBadge
 import org.avitrack.app.ui.theme.AviTrackTextField
 import org.avitrack.app.ui.theme.LocalAviTrackColors
+import kotlin.math.nextDown
+import kotlin.math.nextUp
+import kotlin.math.round
 import kotlin.time.Clock
 import kotlin.time.Instant
 
 private const val MILLIS_PER_DAY = 86_400_000L
 private const val MAX_LITTER_PERCENTAGE = 100
 private const val LITTER_PERCENTAGE_STEP = 10
+private const val FEED_PREVIEW_TOLERANCE = 0.15
+private const val MIN_WATER_PER_BIRD = 210.0
+private const val MAX_WATER_PER_BIRD = 260.0
+private const val DISPLAY_SCALE = 10.0
+private const val ALERT_DISPLAY_SCALE = 1_000.0
+private const val MORTALITY_DISPLAY_SCALE = 1_000_000.0
 private val FormSpacing = 12.dp
 private val FormPadding = 20.dp
 private val FormMaxWidth = 800.dp
 private val TwoFieldColumnsWidth = 540.dp
+private val WarningDialogShape = RoundedCornerShape(16.dp)
+private val WarningBorderWidth = 1.dp
+private val WarningContentMaxHeight = 360.dp
 
 private enum class Reading {
     ANALOG_MIN, ANALOG_MAX, DIGITAL_MIN, DIGITAL_MAX, HUMIDITY, MORTALITY, FEED, WATER,
@@ -63,6 +91,7 @@ fun BarnModeScreen(
     val strings = LocalStrings.current
     val colors = LocalAviTrackColors.current
     val scope = rememberCoroutineScope()
+    val latestLogs by rememberUpdatedState(logs)
     var selectedDay by remember(barn.id) {
         // Start with today's UTC date. The operator can select the farm's local date.
         mutableIntStateOf(Clock.System.now().toEpochMilliseconds().floorDiv(MILLIS_PER_DAY).toInt())
@@ -70,6 +99,7 @@ fun BarnModeScreen(
     var showDatePicker by remember { mutableStateOf(false) }
     var lastSubmissionDay by remember(barn.id) { mutableStateOf<Int?>(null) }
     var saving by remember { mutableStateOf(false) }
+    var postSaveAlerts by remember(barn.id) { mutableStateOf<PostSaveAlerts?>(null) }
     val existingLog = logs.find { it.barnId == barn.id && it.epochDay == selectedDay }
     var readings by remember(barn.id, selectedDay) { mutableStateOf(existingLog.toReadings()) }
     var litter by remember(barn.id, selectedDay) { mutableIntStateOf(existingLog?.litterPercentage ?: 0) }
@@ -78,6 +108,18 @@ fun BarnModeScreen(
     var saveRejected by remember(barn.id, selectedDay) { mutableStateOf(false) }
     val lastSubmission = logs.find { it.barnId == barn.id && it.epochDay == lastSubmissionDay }
         ?: logs.filter { it.barnId == barn.id }.maxByOrNull { it.epochDay }
+    val currentAliveBirds = remember(barn, logs, selectedDay) {
+        ZootechnicalEngine.calculateAliveBirds(barn, logs.filter { it.epochDay < selectedDay })
+    }
+    val intakePreview = remember(barn, logs, selectedDay, readings, currentAliveBirds) {
+        // Daily metrics can estimate either intake while the rest of the form is incomplete.
+        val draft = readings.toLog(barn.id, selectedDay, litter = 0, notes = "", allowIncomplete = true)
+        if (draft != null && currentAliveBirds - draft.mortalityCount > 0) {
+            ZootechnicalEngine.calculateDailyMetrics(barn, draft, logs)
+        } else {
+            null
+        }
+    }
 
     Column(
         modifier = Modifier.fillMaxSize().verticalScroll(rememberScrollState()).padding(FormPadding),
@@ -125,7 +167,22 @@ fun BarnModeScreen(
                 values = readings,
                 enabled = !saving,
                 onChange = { field, value -> readings = readings + (field to value) },
-            )
+            ) { field ->
+                when (field) {
+                    Reading.FEED -> {
+                        val target = ZootechnicalEngine.TARGET_FEED_GRAMS_PER_BIRD
+                        IntakeEstimate(intakePreview?.feedGramsPerBird, strings.gramsPerBirdUnit, strings.feedIntakeTarget) {
+                            outsideIntakeRange(it, target * (1 - FEED_PREVIEW_TOLERANCE), target * (1 + FEED_PREVIEW_TOLERANCE))
+                        }
+                    }
+                    Reading.WATER -> IntakeEstimate(
+                        intakePreview?.waterCubicCentimetersPerBird,
+                        strings.cubicCentimetersPerBirdUnit,
+                        strings.waterIntakeTarget,
+                    ) { outsideIntakeRange(it, MIN_WATER_PER_BIRD, MAX_WATER_PER_BIRD) }
+                    else -> Unit
+                }
+            }
             AviTrackCard(Modifier.fillMaxWidth()) {
                 Text(strings.litterPercentage, style = MaterialTheme.typography.titleMedium)
                 FlowRow(horizontalArrangement = Arrangement.spacedBy(FormSpacing)) {
@@ -165,7 +222,12 @@ fun BarnModeScreen(
                         saving = true
                         scope.launch {
                             try {
-                                if (onSubmit(log)) lastSubmissionDay = log.epochDay else saveRejected = true
+                                if (onSubmit(log)) {
+                                    lastSubmissionDay = log.epochDay
+                                    postSaveAlerts = findPostSaveAlerts(barn, log, latestLogs)
+                                } else {
+                                    saveRejected = true
+                                }
                             } finally {
                                 saving = false
                             }
@@ -175,6 +237,7 @@ fun BarnModeScreen(
             )
         }
     }
+    postSaveAlerts?.let { EarlyWarningDialog(it, onDismiss = { postSaveAlerts = null }) }
     if (showDatePicker) {
         var dateInput by remember { mutableStateOf(formatEpochDay(selectedDay)) }
         var invalidDate by remember { mutableStateOf(false) }
@@ -219,6 +282,7 @@ private fun ReadingCard(
     values: Map<Reading, String>,
     enabled: Boolean,
     onChange: (Reading, String) -> Unit,
+    supportingContent: (@Composable (Reading) -> Unit)? = null,
 ) {
     AviTrackCard(Modifier.fillMaxWidth()) {
         Text(title, style = MaterialTheme.typography.titleMedium)
@@ -230,19 +294,182 @@ private fun ReadingCard(
             ) {
                 fields.forEach { (field, label) ->
                     val type = if (field == Reading.MORTALITY) KeyboardType.Number else KeyboardType.Decimal
-                    AviTrackTextField(
-                        value = values[field].orEmpty(),
-                        onValueChange = { onChange(field, it) },
-                        label = label,
-                        modifier = Modifier.width(fieldWidth),
-                        enabled = enabled,
-                        keyboardOptions = KeyboardOptions(keyboardType = type),
-                    )
+                    Column(Modifier.width(fieldWidth)) {
+                        AviTrackTextField(
+                            value = values[field].orEmpty(),
+                            onValueChange = { onChange(field, it) },
+                            label = label,
+                            modifier = Modifier.fillMaxWidth(),
+                            enabled = enabled,
+                            keyboardOptions = KeyboardOptions(keyboardType = type),
+                        )
+                        supportingContent?.invoke(field)
+                    }
                 }
             }
         }
     }
 }
+
+@Composable
+private fun IntakeEstimate(
+    value: Double?,
+    unit: String,
+    target: String,
+    isOutsideTarget: (Double) -> Boolean,
+) {
+    if (value == null || !value.isFinite() || value <= 0.0) return
+    val strings = LocalStrings.current
+    val colors = LocalAviTrackColors.current
+    val scheme = MaterialTheme.colorScheme
+    val warningColor = if (scheme.surface == colors.mahoganySurface) colors.yolkAmber else colors.combCrimson
+
+    Text(
+        text = "${strings.estimatedIntake}: ${formatReading(value, strings.decimalSeparator)} $unit\n$target",
+        style = MaterialTheme.typography.bodySmall,
+        fontFamily = FontFamily.Monospace,
+        color = if (isOutsideTarget(value)) warningColor else scheme.onSurfaceVariant,
+    )
+}
+
+private fun outsideIntakeRange(value: Double, minimum: Double, maximum: Double): Boolean =
+    value.nextUp() < minimum || value.nextDown() > maximum
+
+private data class PostSaveAlerts(val log: DailyLog, val metrics: DailyMetrics, val alerts: List<EarlyAlert>)
+
+private fun findPostSaveAlerts(barn: Barn, submitted: DailyLog, history: List<DailyLog>): PostSaveAlerts? {
+    // Mirror the repository's latest-record rule, including the just-saved log before UI state refreshes.
+    val barnLogs = history.filter { it.barnId == barn.id && it.epochDay != submitted.epochDay } + submitted
+    val latest = barnLogs.maxBy { it.epochDay }
+    val alerts = ZootechnicalEngine.evaluateAlerts(barn, latest, barnLogs)
+    if (alerts.isEmpty()) return null
+    return PostSaveAlerts(
+        log = latest,
+        metrics = ZootechnicalEngine.calculateDailyMetrics(barn, latest, barnLogs),
+        alerts = alerts.sortedByDescending { it.severity == AlertSeverity.CRITICAL },
+    )
+}
+
+@Composable
+private fun EarlyWarningDialog(result: PostSaveAlerts, onDismiss: () -> Unit) {
+    val strings = LocalStrings.current
+    val colors = LocalAviTrackColors.current
+    val borderColor = if (result.alerts.any { it.severity == AlertSeverity.CRITICAL }) {
+        colors.combCrimson
+    } else {
+        colors.yolkAmber
+    }
+
+    AlertDialog(
+        onDismissRequest = onDismiss,
+        modifier = Modifier.border(WarningBorderWidth, borderColor, WarningDialogShape),
+        shape = WarningDialogShape,
+        icon = { Icon(EarlyWarningIcon, contentDescription = null, tint = borderColor) },
+        title = { Text(strings.earlyWarningDetected) },
+        text = {
+            Column(
+                modifier = Modifier.heightIn(max = WarningContentMaxHeight).verticalScroll(rememberScrollState()),
+                verticalArrangement = Arrangement.spacedBy(FormSpacing),
+            ) {
+                Text(strings.verifyBarnConditions)
+                Text(
+                    "${strings.date}: ${formatEpochDay(result.log.epochDay)}",
+                    style = MaterialTheme.typography.bodySmall,
+                )
+                result.alerts.forEach { alert ->
+                    val copy = strings.alertText(alert.type)
+                    val reading = alertReading(alert.type, result)
+                    Column {
+                        Text(copy.title, style = MaterialTheme.typography.titleSmall)
+                        Text(copy.description, style = MaterialTheme.typography.bodyMedium)
+                        Text("${strings.detectedValue}: ${reading.detected}")
+                        Text("${strings.expectedRange}: ${reading.expected}")
+                    }
+                }
+            }
+        },
+        confirmButton = { AviTrackPrimaryButton(strings.understood, onClick = onDismiss) },
+    )
+}
+
+private data class AlertReading(val detected: String, val expected: String)
+
+@Composable
+private fun alertReading(type: AlertType, result: PostSaveAlerts): AlertReading {
+    val strings = LocalStrings.current
+    val log = result.log
+    val metrics = result.metrics
+    fun reading(value: Double?, unit: String): String {
+        if (value == null) return "—"
+        return "${formatReading(value, strings.decimalSeparator, ALERT_DISPLAY_SCALE)} $unit"
+    }
+
+    return when (type) {
+        AlertType.LOW_TEMPERATURE, AlertType.HIGH_TEMPERATURE -> {
+            val value = if (type == AlertType.LOW_TEMPERATURE) {
+                minOf(log.analogTempMin, log.digitalTempMin)
+            } else {
+                maxOf(log.analogTempMax, log.digitalTempMax)
+            }
+            AlertReading(reading(value, strings.celsiusUnit), "18–28 ${strings.celsiusUnit}")
+        }
+        AlertType.SENSOR_DRIFT -> AlertReading(
+            reading(metrics.sensorDriftCelsius, strings.celsiusUnit),
+            "≤ 2 ${strings.celsiusUnit}",
+        )
+        AlertType.SUSTAINED_MORTALITY -> {
+            val count = "${log.mortalityCount} ${strings.birdsUnit}"
+            val percentage = metrics.mortalityPercentage
+            val detected = if (percentage == null) {
+                "$count · ${strings.aliveBirds}: ${metrics.aliveBirds}"
+            } else {
+                val formatted = formatReading(percentage, strings.decimalSeparator, MORTALITY_DISPLAY_SCALE)
+                "$formatted ${strings.percentUnit} ($count)"
+            }
+            AlertReading(detected, strings.mortalityExpectedRange)
+        }
+        AlertType.LOW_FEED_INTAKE, AlertType.HIGH_FEED_INTAKE -> AlertReading(
+            reading(metrics.feedGramsPerBird, strings.gramsPerBirdUnit),
+            "110–126 ${strings.gramsPerBirdUnit}",
+        )
+        AlertType.LOW_WATER_INTAKE, AlertType.HIGH_WATER_INTAKE -> AlertReading(
+            reading(metrics.waterCubicCentimetersPerBird, strings.cubicCentimetersPerBirdUnit),
+            "${MIN_WATER_PER_BIRD.toInt()}–${MAX_WATER_PER_BIRD.toInt()} ${strings.cubicCentimetersPerBirdUnit}",
+        )
+        AlertType.LOW_HUMIDITY, AlertType.HIGH_HUMIDITY -> AlertReading(
+            reading(log.relativeHumidityAvg, strings.percentUnit),
+            "50–75 ${strings.percentUnit}",
+        )
+    }
+}
+
+private fun formatReading(value: Double, decimalSeparator: String, scale: Double = DISPLAY_SCALE): String =
+    (round(value * scale) / scale).toString().removeSuffix(".0").replace(".", decimalSeparator)
+
+private val EarlyWarningIcon = ImageVector.Builder(
+    name = "EarlyWarning",
+    defaultWidth = 24.dp,
+    defaultHeight = 24.dp,
+    viewportWidth = 24f,
+    viewportHeight = 24f,
+).apply {
+    path(fill = SolidColor(Color.Black), pathFillType = PathFillType.EvenOdd) {
+        moveTo(12f, 2f)
+        lineTo(23f, 21f)
+        lineTo(1f, 21f)
+        close()
+        moveTo(11f, 9f)
+        lineTo(13f, 9f)
+        lineTo(13f, 15f)
+        lineTo(11f, 15f)
+        close()
+        moveTo(11f, 17f)
+        lineTo(13f, 17f)
+        lineTo(13f, 19f)
+        lineTo(11f, 19f)
+        close()
+    }
+}.build()
 
 private fun DailyLog?.toReadings(): Map<Reading, String> {
     if (this == null) return emptyMap()
@@ -258,9 +485,18 @@ private fun DailyLog?.toReadings(): Map<Reading, String> {
     )
 }
 
-private fun Map<Reading, String>.toLog(barnId: String, day: Int, litter: Int, notes: String): DailyLog? {
-    fun reading(field: Reading) = this[field]?.trim()?.replace(',', '.')?.toDoubleOrNull()
-    val mortality = this[Reading.MORTALITY]?.trim()?.toIntOrNull()?.takeIf { it >= 0 } ?: return null
+private fun Map<Reading, String>.toLog(
+    barnId: String,
+    day: Int,
+    litter: Int,
+    notes: String,
+    allowIncomplete: Boolean = false,
+): DailyLog? {
+    fun reading(field: Reading): Double? =
+        this[field]?.trim()?.replace(',', '.')?.toDoubleOrNull() ?: Double.NaN.takeIf { allowIncomplete }
+
+    val mortality = (this[Reading.MORTALITY]?.trim()?.toIntOrNull() ?: 0.takeIf { allowIncomplete })
+        ?.takeIf { it >= 0 } ?: return null
     return DailyLog(
         barnId = barnId,
         epochDay = day,
